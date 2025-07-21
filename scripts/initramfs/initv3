@@ -403,6 +403,12 @@ maybe_volumio_break progress "init: $LINENO"
 mount -t vfat "${BOOT_PARTITION}" "${BOOTMNT}"
 mount -t ext4 "${IMAGE_PARTITION}" "${IMAGEMNT}"
 
+# Update cmdline.txt using fragments
+if type custom_update_cmdline >/dev/null 2>&1; then
+  maybe_volumio_break update_cmdline "init: $LINENO"
+  custom_update_cmdline
+fi
+
 # In case of a gpt boot partition: move the backup table when not done yet
 # This function is also safe for non-gpt boot partitions (it will not trigger a mismatch).
 #

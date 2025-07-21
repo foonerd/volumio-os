@@ -640,3 +640,54 @@ custom_update_UUID() {
   # Placeholder for custom-functions before "update_fstab()" 
   :
 }
+
+#------------------------------------------------------------------------------
+# custom_update_cmdline
+#
+# This function reconstructs /boot/cmdline.txt using the following components:
+#   - /boot/usercmdline.pre   : Optional user-specified parameters to prepend
+#   - /boot/cmdline.base      : Required base template (OTA-managed)
+#   - /boot/usercmdline.appnd : Optional user-specified parameters to append
+#
+# Rationale:
+# Volumio OTA updates overwrite /boot/cmdline.txt. To allow user-defined
+# kernel parameters (e.g. USB quirks, display workarounds) to persist safely,
+# this function reassembles cmdline.txt dynamically during early boot.
+#
+# Constraints:
+#   - Raspberry Pi GPU firmware limits cmdline.txt to 1023 characters.
+#   - All three files are flattened to a single space-separated line.
+#   - Duplicate application is avoided by design.
+#
+# Called after BOOT_PARTITION and IMAGE_PARTITION are mounted.
+#------------------------------------------------------------------------------
+custom_update_cmdline() {
+  log_begin_msg "Updating cmdline.txt from override fragments" && log_end_msg
+
+  local PRE_FILE="${BOOTMNT}/usercmdline.pre"
+  local BASE_FILE="${BOOTMNT}/cmdline.base"
+  local APP_FILE="${BOOTMNT}/usercmdline.appnd"
+  local OUT_FILE="${BOOTMNT}/cmdline.txt"
+
+  # Sanity check: base must exist, otherwise skip override
+  if [ ! -f "${BASE_FILE}" ]; then
+    log_warning_msg "cmdline.base not found - skipping custom cmdline update"
+    return 0
+  fi
+
+  # Read optional fragments
+  pre=$( [ -f "$PRE_FILE" ] && tr -d '\n' < "$PRE_FILE" | tr -s ' ' || echo "" )
+  base=$(tr -d '\n' < "$BASE_FILE" | tr -s ' ')
+  app=$( [ -f "$APP_FILE" ] && tr -d '\n' < "$APP_FILE" | tr -s ' ' || echo "" )
+
+  # Combine safely
+  final="${pre} ${base} ${app}"
+  final=$(echo "$final" | tr -s ' ' | sed 's/^ *//;s/ *$//')
+
+  # Trim to 1023 characters (Raspberry Pi bootloader limit)
+  final=$(echo "$final" | cut -c1-1023)
+
+  # Write to cmdline.txt
+  echo "$final" > "$OUT_FILE"
+  log_end_msg
+}

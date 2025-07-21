@@ -35,4 +35,20 @@ if [ ! -z "${UUIDFMT}" ]; then
     log_end_msg
   fi
 fi
+
+# Check if cmdline.base exists and uses UUIDs before applying update
+if [ -f "${BOOTMNT}/cmdline.base" ]; then
+  UUID_BASE_FMT=`cat "${BOOTMNT}/cmdline.base" | grep "UUID=" -o`
+  if [ -n "${UUID_BASE_FMT}" ]; then
+    log_begin_msg "Updating UUIDs in cmdline.base" && log_end_msg
+
+    update_UUID "bootpart" "${BOOT_PARTITION}" "${BOOTMNT}/cmdline.base"
+    update_UUID "imgpart" "${IMAGE_PARTITION}" "${BOOTMNT}/cmdline.base"
+    update_UUID "datapart" "${DATA_PARTITION}" "${BOOTMNT}/cmdline.base"
+
+    log_end_msg
+  else
+    log_begin_msg "cmdline.base does not use UUIDs, skipping update" && log_end_msg
+  fi
+fi
 }

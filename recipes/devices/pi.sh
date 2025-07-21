@@ -11,7 +11,7 @@ ARCH="armhf"
 BUILD="arm"
 
 ### Build image with initramfs debug info?
-DEBUG_IMAGE="no" # yes/no or empty. Also changes SHOW_SPLASH in cmdline.txt
+DEBUG_IMAGE="no" # yes/no or empty. Also changes SHOW_SPLASH in cmdline.base
 
 ### Device information
 # Used to identify devices (VOLUMIO_HARDWARE) and keep backward compatibility
@@ -448,7 +448,7 @@ device_chroot_tweaks_pre() {
 		display_auto_detect=1
 	EOF
 
-	log "Writing cmdline.txt file" "info"
+	log "Writing cmdline.base file" "info"
 
 	# Build up the base parameters
 	# Prepare kernel_params placeholder
@@ -459,18 +459,18 @@ device_chroot_tweaks_pre() {
 	# In init, "quiet" had no influence (unused), but in init{v2,v3} it will prevent initrd console output
 	# So, when debugging, remove it and update loglevel to value: 8
 	if [[ $DEBUG_IMAGE == yes ]]; then
-		log "Debug image: remove splash from cmdline.txt" "cfg"
+		log "Debug image: remove splash from cmdline.base" "cfg"
 		SHOW_SPLASH="nosplash" # Debug removed
-		log "Debug image: remove quiet from cmdline.txt" "cfg"
+		log "Debug image: remove quiet from cmdline.base" "cfg"
 		KERNEL_QUIET="" # Debug removed
-		log "Debug image: change loglevel to value: 8, debug, break and kmsg in cmdline.txt" "cfg"
+		log "Debug image: change loglevel to value: 8, debug, break and kmsg in cmdline.base" "cfg"
 		KERNEL_LOGLEVEL="loglevel=8 debug break= use_kmsg=yes" # Default Debug
 	else
-		log "Default image: add splash to cmdline.txt" "cfg"
+		log "Default image: add splash to cmdline.base" "cfg"
 		SHOW_SPLASH="splash" # Default splash enabled
-		log "Default image: add quiet to cmdline.txt" "cfg"
+		log "Default image: add quiet to cmdline.base" "cfg"
 		KERNEL_QUIET="quiet" # Default quiet enabled
-		log "Default image: change loglevel to value: 0, nodebug, no break  and no kmsg in cmdline.txt" "cfg"
+		log "Default image: change loglevel to value: 0, nodebug, no break  and no kmsg in cmdline.base" "cfg"
 		KERNEL_LOGLEVEL="loglevel=0 nodebug use_kmsg=no" # Default to KERN_EMERG
 	fi
 
@@ -523,7 +523,7 @@ device_chroot_tweaks_pre() {
 
 	kernel_params+=("${KERNEL_LOGLEVEL}")
 	log "Setting ${#kernel_params[@]} Kernel params:" "${kernel_params[*]}" "info"
-	cat <<-EOF >/boot/cmdline.txt
+	cat <<-EOF >/boot/cmdline.base
 		${kernel_params[@]}
 	EOF
 
