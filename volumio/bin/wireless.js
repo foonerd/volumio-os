@@ -851,6 +851,123 @@ function stop(callback) {
     });
 }
 
+// ===================================================================
+// SNM SCAN MODE FUNCTIONS
+// ===================================================================
+
+// Keep wlan0 UP without IP for scanning capability (SNM ethernet active)
+function keepWlanUpWithoutIP(callback) {
+    // Check if wireless is disabled in config
+    if (isWirelessDisabled()) {
+        loggerInfo("SNM: WiFi disabled in config, not starting scan mode");
+        loggerInfo("SNM: Ethernet has exclusive access");
+        return callback(null);
+    }
+    
+    loggerInfo("SNM: Maintaining wlan0 UP without IP (scan mode)");
+    loggerInfo("SNM: Users can configure WiFi via WebUI while ethernet is active");
+    
+    // Step 1: Stop any existing connections and clear state
+    stopAP(function(err) {
+        if (err) loggerInfo("keepWlanUpWithoutIP: stopAP error: " + err);
+        
+        // Step 2: Bring interface UP
+        launch(ifconfigUp, "ifconfig_up", true, function(err) {
+            if (err) {
+                loggerInfo("keepWlanUpWithoutIP: Failed to bring interface UP: " + err);
+                return callback(err);
+            }
+            
+            loggerDebug("keepWlanUpWithoutIP: Interface brought UP");
+            
+            // Step 3: Flush any existing IP addresses
+            var flushCmd = SUDO + " " + IP + " addr flush dev " + wlan;
+            launch(flushCmd, "flush_ip", true, function(err) {
+                if (err) loggerDebug("keepWlanUpWithoutIP: IP flush error (may be expected): " + err);
+                
+                loggerDebug("keepWlanUpWithoutIP: IP addresses flushed");
+                
+                // Step 4: Start wpa_supplicant (for scanning capability)
+                launch(wpasupp, "wpa_supplicant", true, function(err) {
+                    if (err) {
+                        loggerInfo("keepWlanUpWithoutIP: wpa_supplicant failed: " + err);
+                        return callback(err);
+                    }
+                    
+                    loggerDebug("keepWlanUpWithoutIP: wpa_supplicant started");
+                    
+                    // Step 5: Tell wpa_supplicant to disconnect (don't associate)
+                    // This keeps it in DISCONNECTED state - interface UP, no connection
+                    var disconnectCmd = wpacli + " disconnect";
+                    launch(disconnectCmd, "wpa_disconnect", true, function(err) {
+                        if (err) loggerDebug("keepWlanUpWithoutIP: disconnect command error: " + err);
+                        
+                        // Calculate transition time for diagnostics
+                        if (transitionStartTime > 0) {
+                            var transitionTime = Date.now() - transitionStartTime;
+                            loggerInfo("SNM: Transition to scan mode completed in " + transitionTime + "ms");
+                            transitionStartTime = 0;
+                        }
+                        
+                        loggerInfo("SNM: wlan0 is UP without IP, scan capable");
+                        
+                        // Write SNM status for backend notification
+                        try {
+                            fs.writeFileSync(SNM_STATUS_FILE, 'scan_mode', 'utf8');
+                        } catch (e) {
+                            loggerDebug("Could not write SNM status: " + e);
+                        }
+                        
+                        // Verify final state (diagnostic)
+                        verifyWlanScanState();
+                        
+                        callback(null);
+                    });
+                });
+            });
+        });
+    });
+}
+
+// Verify wlan0 is in scan-capable state (UP without IP)
+// Verify wlan0 is in correct scan mode state (diagnostic)
+function verifyWlanScanState() {
+    try {
+        // Check interface state
+        var linkState = execSync(ipLink, { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+        var isUP = linkState.includes('state UP');
+        var hasCarrier = !linkState.includes('NO-CARRIER');
+        
+        loggerDebug("wlan0 verification: UP=" + isUP + " CARRIER=" + hasCarrier);
+        
+        // Check IP address
+        var addrState = execSync(ipAddr, { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+        var hasIPv4 = addrState.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+        
+        if (hasIPv4) {
+            loggerInfo("WARNING: wlan0 has IP " + hasIPv4[1] + " but should have none");
+        } else {
+            loggerDebug("wlan0 verification: No IP (correct)");
+        }
+        
+        // Check wpa_supplicant state
+        var wpaState = execSync(wpacli + " status | " + GREP + " wpa_state", { 
+            encoding: 'utf8', 
+            timeout: EXEC_TIMEOUT_SHORT 
+        }).trim();
+        loggerDebug("wlan0 verification: " + wpaState);
+        
+        if (wpaState.includes("DISCONNECTED") || wpaState.includes("INACTIVE")) {
+            loggerDebug("wlan0 verification: PASSED - interface ready for scanning");
+        } else {
+            loggerInfo("wlan0 state: " + wpaState + " (expected DISCONNECTED or INACTIVE)");
+        }
+        
+    } catch (e) {
+        loggerDebug("wlan0 verification error: " + e);
+    }
+}
+
 // Reconnect WiFi after ethernet disconnect in Single Network Mode
 // Uses wpa_cli reconnect for fast transition without full flow restart
 function reconnectWiFiAfterEthernet(callback) {
