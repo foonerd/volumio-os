@@ -322,6 +322,18 @@ function clearConnectionTimer() {
     }
 }
 
+// Check if wlan0 is a USB WiFi adapter
+// Returns true if USB, false if onboard or check fails
+function isUsbWifiAdapter() {
+    try {
+        var linkPath = execSync(checkInterfaceLink, { encoding: 'utf8' }).trim();
+        return linkPath.includes('usb');
+    } catch (e) {
+        loggerDebug("Could not determine if wlan0 is USB: " + e);
+        return false;
+    }
+}
+
 function stopAP(callback) {
     kill(justdhclient, function(err) {
         kill(wpasupp, function(err) {
