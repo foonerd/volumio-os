@@ -645,6 +645,139 @@ function detectInterfaceRename(originalName, currentMAC) {
     return null;
 }
 
+// ===================================================================
+// STAGE 2 MODULE: WPA STATE MACHINE
+// Event-driven wpa_supplicant monitoring and state management
+// Note: WPA_STATES, WPA_STATE_TIMEOUTS, and wpaStateContext are defined
+// in the constants section at the top of this file
+// ===================================================================
+
+// Monitor wpa_supplicant state changes via wpa_cli status polling
+// This is a simplified event monitor - full event-driven via wpa_cli -a would require
+// creating an action script file, which adds deployment complexity
+function startWpaStateMonitor(interfaceName, callback) {
+    loggerInfo("WpaStateMachine: Starting state monitor for " + interfaceName);
+    
+    wpaStateContext.stateCallback = callback;
+    wpaStateContext.currentState = null;
+    wpaStateContext.consecutiveFailures = 0;
+    
+    // Poll wpa_supplicant state every 500ms for changes
+    var pollInterval = 500;
+    var checkCount = 0;
+    var maxChecks = 120; // 60 seconds max monitoring
+    
+    function pollState() {
+        checkCount++;
+        
+        if (checkCount > maxChecks) {
+            loggerInfo("WpaStateMachine: Max monitoring duration reached, stopping");
+            stopWpaStateMonitor();
+            callback('TIMEOUT', null);
+            return;
+        }
+        
+        try {
+            var status = execSync(WPA_CLI + ' -i ' + interfaceName + ' status', {
+                encoding: 'utf8',
+                timeout: EXEC_TIMEOUT_SHORT
+            });
+            
+            // Parse wpa_state from status
+            var stateMatch = status.match(/wpa_state=([A-Z_0-9]+)/);
+            if (stateMatch) {
+                var newState = stateMatch[1];
+                
+                if (newState !== wpaStateContext.currentState) {
+                    handleWpaStateTransition(wpaStateContext.currentState, newState, status);
+                }
+            }
+            
+            // Continue polling if not stopped
+            if (wpaStateContext.monitorProcess) {
+                wpaStateContext.monitorProcess = setTimeout(pollState, pollInterval);
+            }
+            
+        } catch (e) {
+            loggerDebug("WpaStateMachine: State poll error: " + e);
+            // wpa_supplicant may have crashed or been killed
+            if (wpaStateContext.stateCallback) {
+                stopWpaStateMonitor();
+                callback('ERROR', 'wpa_supplicant not responding');
+            }
+        }
+    }
+    
+    // Start polling
+    wpaStateContext.monitorProcess = setTimeout(pollState, pollInterval);
+}
+
+// Stop wpa_supplicant state monitoring
+function stopWpaStateMonitor() {
+    if (wpaStateContext.monitorProcess) {
+        clearTimeout(wpaStateContext.monitorProcess);
+        wpaStateContext.monitorProcess = null;
+    }
+    
+    if (wpaStateContext.timeoutHandle) {
+        clearTimeout(wpaStateContext.timeoutHandle);
+        wpaStateContext.timeoutHandle = null;
+    }
+    
+    loggerDebug("WpaStateMachine: State monitor stopped");
+}
+
+// Handle wpa_supplicant state transitions
+function handleWpaStateTransition(oldState, newState, statusOutput) {
+    var now = Date.now();
+    var timeInOldState = oldState ? (now - wpaStateContext.stateEnterTime) : 0;
+    
+    loggerInfo("WpaStateMachine: State transition: " + (oldState || 'NULL') + " -> " + newState + 
+               " (duration: " + timeInOldState + "ms)");
+    
+    // Update context
+    wpaStateContext.previousState = oldState;
+    wpaStateContext.currentState = newState;
+    wpaStateContext.stateEnterTime = now;
+    
+    // Clear existing timeout
+    if (wpaStateContext.timeoutHandle) {
+        clearTimeout(wpaStateContext.timeoutHandle);
+        wpaStateContext.timeoutHandle = null;
+    }
+    
+    // Handle state-specific logic
+    switch (newState) {
+        case WPA_STATES.INTERFACE_DISABLED:
+            handleInterfaceDisabledState();
+            break;
+            
+        case WPA_STATES.SCANNING:
+            handleScanningState();
+            break;
+            
+        case WPA_STATES.AUTHENTICATING:
+            handleAuthenticatingState();
+            break;
+            
+        case WPA_STATES.ASSOCIATING:
+            handleAssociatingState();
+            break;
+            
+        case WPA_STATES.FOUR_WAY_HANDSHAKE:
+            handleFourWayHandshakeState();
+            break;
+            
+        case WPA_STATES.COMPLETED:
+            handleCompletedState(statusOutput);
+            break;
+            
+        case WPA_STATES.DISCONNECTED:
+            handleDisconnectedState();
+            break;
+    }
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
