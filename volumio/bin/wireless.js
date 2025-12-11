@@ -2,6 +2,71 @@
 
 //Volumio Network Manager - Copyright Michelangelo Guarise - Volumio.org
 
+// ===================================================================
+// TIMEOUT CONSTANTS - Single source of truth for all timeout values
+// ===================================================================
+var EXEC_TIMEOUT_SHORT = 2000;      // General command execution (2s)
+var EXEC_TIMEOUT_MEDIUM = 3000;     // Medium operations like regdomain detection (3s)
+var EXEC_TIMEOUT_LONG = 5000;       // Long operations like service restarts (5s)
+var EXEC_TIMEOUT_SCAN = 10000;      // Network scanning for regdomain (10s)
+var KILL_TIMEOUT = 5000;            // kill() timeout wrapper (5s)
+var RECONNECT_WAIT = 3000;          // Wait for wpa_supplicant association (3s)
+var USB_SETTLE_WAIT = 2000;         // USB WiFi adapter settle time (2s)
+var HOTSPOT_RETRY_DELAY = 3000;     // Hotspot fallback retry delay (3s)
+var STARTAP_RETRY_DELAY = 2000;     // startAP retry delay (2s)
+var INTERFACE_CHECK_INTERVAL = 500; // Interface ready polling interval (500ms)
+var INTERFACE_READY_TIMEOUT = 8000; // Max wait for interface to become ready (8s)
+
+// ===================================================================
+// COMMAND BINARIES - Single source of truth for all executable paths
+// ===================================================================
+var SUDO = "/usr/bin/sudo";
+var IFCONFIG = "/sbin/ifconfig";
+var IW = "/sbin/iw";
+var IP = "/sbin/ip";
+var DHCPCD = "/sbin/dhcpcd";
+var SYSTEMCTL = "/bin/systemctl";
+var IWGETID = "/sbin/iwgetid";
+var WPA_CLI = "/sbin/wpa_cli";
+var WPA_SUPPLICANT = "wpa_supplicant";
+var PGREP = "pgrep";
+var CAT = "cat";
+var GREP = "grep";
+var CUT = "cut";
+var TR = "tr";
+
+// ===================================================================
+// FILE PATHS - Single source of truth for all file system paths
+// ===================================================================
+// System paths
+var VOLUMIO_ENV = "/volumio/.env";
+var OS_RELEASE = "/etc/os-release";
+var CRDA_CONFIG = "/etc/default/crda";
+var WPA_SUPPLICANT_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf";
+
+// Data paths
+var DATA_DIR = "/data";
+var CONFIG_DIR = DATA_DIR + "/configuration";
+var NET_CONFIGURED = CONFIG_DIR + "/netconfigured";
+var WLAN_STATIC = CONFIG_DIR + "/wlanstatic";
+var NETWORK_CONFIG = CONFIG_DIR + "/system_controller/network/config.json";
+var WLAN_STATUS_FILE = DATA_DIR + "/wlan0status";
+var ETH_STATUS_FILE = DATA_DIR + "/eth0status";
+var SNM_STATUS_FILE = DATA_DIR + "/snm_status";  // Single Network Mode status for backend
+var FLAG_DIR = DATA_DIR + "/flagfiles";
+var WIRELESS_ESTABLISHED_FLAG = FLAG_DIR + "/wirelessEstablishedOnce";
+
+// Temporary paths
+var TMP_DIR = "/tmp";
+var WIRELESS_LOG = TMP_DIR + "/wireless.log";
+var FORCE_HOTSPOT_FLAG = TMP_DIR + "/forcehotspot";
+var NETWORK_STATUS_FILE = TMP_DIR + "/networkstatus";  // Node notifier
+
+// System paths
+var SYS_CLASS_NET = "/sys/class/net";
+var VOLUMIO_PLUGINS = "/volumio/app/plugins";
+var IFCONFIG_LIB = VOLUMIO_PLUGINS + "/system_controller/network/lib/ifconfig.js";
+
 // Time needed to settle some commands sent to the system like ifconfig
 var debug = false;
 
