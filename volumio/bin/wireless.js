@@ -1260,6 +1260,13 @@ function stopAP(callback) {
     });
 }
 
+// Main wireless flow initialization
+// Handles various startup scenarios:
+// - Forced hotspot mode (/tmp/forcehotspot)
+// - Unconfigured network (first boot)
+// - Wireless disabled
+// - Single network mode with active ethernet
+// - Normal WiFi client connection
 function startFlow() {
     // Prevent duplicate flow starts
     if (wirelessFlowInProgress) {
@@ -1276,10 +1283,16 @@ function startFlow() {
     apStartInProgress = false;
     wpaerr = 0;
 
+    var directhotspot = false;
     try {
         var netconfigured = fs.statSync(NET_CONFIGURED);
+        if (!netconfigured) {
+            loggerInfo("netconfigured file invalid, starting hotspot");
+            directhotspot = true;
+        }
     } catch (e) {
-        var directhotspot = true;
+        loggerInfo("netconfigured file not found, starting hotspot");
+        directhotspot = true;
     }
 
     try {
@@ -1295,14 +1308,39 @@ function startFlow() {
             notifyWirelessReady();
         });
     } else if (isWirelessDisabled()) {
-        loggerInfo('Wireless Networking DISABLED, not starting wireless flow');
-        notifyWirelessReady();
-    } else if (singleNetworkMode && isWiredNetworkActive) {
-        loggerInfo('Single Network Mode: Wired network active, not starting wireless flow');
-        notifyWirelessReady();
-    } else if (directhotspot){
-        startHotspot(function () {
+        // Emergency override - if no ethernet, force hotspot despite WiFi disabled
+        if (!isWiredNetworkActive) {
+            loggerInfo('=== EMERGENCY OVERRIDE ===');
+            loggerInfo('WiFi DISABLED in config, but no ethernet available');
+            loggerInfo('Forcing hotspot for system accessibility');
+            loggerInfo('User can disable hotspot after connecting via emergency AP');
+            loggerInfo('==========================');
+            startHotspotFallbackSafe();
+        } else {
+            loggerInfo('Wireless Networking DISABLED, not starting wireless flow');
             notifyWirelessReady();
+        }
+    } else if (singleNetworkMode && isWiredNetworkActive) {
+        // Keep wlan0 UP without IP for scanning capability
+        loggerInfo('Single Network Mode: Ethernet active, maintaining WiFi scan capability');
+        keepWlanUpWithoutIP(function(err) {
+            if (err) {
+                loggerInfo('Failed to maintain scan mode: ' + err);
+                loggerInfo('Falling back to interface DOWN');
+            }
+            notifyWirelessReady();
+        });
+    } else if (directhotspot){
+        // Wait for interface readiness before starting hotspot (same as STA mode)
+        waitForUdevSettle(EXEC_TIMEOUT_LONG, function(udevErr) {
+            waitForInterfaceReady(wlan, INTERFACE_READY_TIMEOUT, function(err, validation) {
+                if (err) {
+                    loggerInfo("Interface not ready for hotspot: " + (validation ? validation.reason : err.message));
+                }
+                startHotspot(function () {
+                    notifyWirelessReady();
+                });
+            });
         });
     } else {
         loggerInfo("Start wireless flow");
@@ -1310,6 +1348,9 @@ function startFlow() {
     }
 }
 
+// Attempt hotspot fallback with retry logic and verification
+// Retries up to hotspotMaxRetries times if hotspot fails to start
+// Verifies hostapd service is actually active after start
 function startHotspotFallbackSafe(retry = 0) {
     const hotspotMaxRetries = 3;
 
@@ -1317,7 +1358,7 @@ function startHotspotFallbackSafe(retry = 0) {
         if (err) {
             loggerInfo(`Hotspot launch failed. Retry ${retry + 1} of ${hotspotMaxRetries}`);
             if (retry + 1 < hotspotMaxRetries) {
-                setTimeout(() => startHotspotFallbackSafe(retry + 1), 3000);
+                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
             } else {
                 loggerInfo("Hotspot failed after maximum retries. System remains offline.");
                 notifyWirelessReady();
@@ -1327,11 +1368,11 @@ function startHotspotFallbackSafe(retry = 0) {
 
         // Verify hostapd status
         try {
-            const hostapdStatus = execSync("systemctl is-active hostapd", { encoding: 'utf8' }).trim();
+            const hostapdStatus = execSync(SYSTEMCTL + " is-active hostapd", { encoding: 'utf8' }).trim();
             if (hostapdStatus !== "active") {
                 loggerInfo("Hostapd did not reach active state. Retrying fallback.");
                 if (retry + 1 < hotspotMaxRetries) {
-                    setTimeout(() => startHotspotFallbackSafe(retry + 1), 3000);
+                    setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
                 } else {
                     loggerInfo("Hostapd failed after maximum retries. System remains offline.");
                     notifyWirelessReady();
@@ -1344,7 +1385,7 @@ function startHotspotFallbackSafe(retry = 0) {
         } catch (e) {
             loggerInfo("Error checking hostapd status: " + e.message);
             if (retry + 1 < hotspotMaxRetries) {
-                setTimeout(() => startHotspotFallbackSafe(retry + 1), 3000);
+                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
             } else {
                 loggerInfo("Could not confirm hostapd status. System remains offline.");
                 notifyWirelessReady();
@@ -1370,6 +1411,7 @@ function startHotspotFallbackSafe(retry = 0) {
     }
 }
 
+// Stop all wireless operations (client and hotspot)
 function stop(callback) {
     stopAP(function() {
         stopHotspot(callback);
@@ -1784,19 +1826,32 @@ function getWirelessWPADriverString() {
     }
 }
 
+// Auto-detect and apply wireless regulatory domain
+// Scans for country codes in beacon frames and sets the most common one
 function detectAndApplyRegdomain(callback) {
     if (isWirelessDisabled()) {
         return callback();
     }
     var appropriateRegDom = '00';
     try {
-        var currentRegDomain = execSync("/usr/bin/sudo /sbin/ifconfig wlan0 up && /usr/bin/sudo /sbin/iw reg get | grep country | cut -f1 -d':'", { uid: 1000, gid: 1000, encoding: 'utf8'}).replace(/country /g, '').replace('\n','');
-        var countryCodesInScan = execSync("/usr/bin/sudo /sbin/ifconfig wlan0 up && /usr/bin/sudo /sbin/iw wlan0 scan | grep Country: | cut -f 2", { uid: 1000, gid: 1000, encoding: 'utf8'}).replace(/Country: /g, '').split('\n');
-        var appropriateRegDomain = determineMostAppropriateRegdomain(countryCodesInScan);
-        loggerDebug('CURRENT REG DOMAIN: ' + currentRegDomain)
-        loggerDebug('APPROPRIATE REG DOMAIN: ' + appropriateRegDomain)
-        if (isValidRegDomain(appropriateRegDomain) && appropriateRegDomain !== currentRegDomain) {
-            applyNewRegDomain(appropriateRegDomain);
+        // Use timeout to prevent blocking startup for too long
+        // FIX v4.0-rc3: Use grep -m 1 to limit to first match and split('\n')[0] to handle multi-line output
+        // Prevents "Regdomain already set to: 00\n99" appearing on two lines in logs
+        var currentRegDomain = execSync(ifconfigUp + " && " + iwRegGet + " | " + GREP + " -m 1 country | " + CUT + " -f1 -d':'", { uid: 1000, gid: 1000, encoding: 'utf8', timeout: EXEC_TIMEOUT_MEDIUM }).replace(/country /g, '').split('\n')[0].trim();
+        
+        loggerDebug('CURRENT REG DOMAIN: ' + currentRegDomain);
+        
+        // Only scan if current regdomain is default (00)
+        if (currentRegDomain === '00' || currentRegDomain === '0099' || !currentRegDomain) {
+            loggerDebug('Current regdomain is default, scanning for appropriate regdomain...');
+            var countryCodesInScan = execSync(ifconfigUp + " && " + iwScan + " | " + GREP + " Country: | " + CUT + " -f 2", { uid: 1000, gid: 1000, encoding: 'utf8', timeout: EXEC_TIMEOUT_SCAN }).replace(/Country: /g, '').split('\n');
+            var appropriateRegDomain = determineMostAppropriateRegdomain(countryCodesInScan);
+            loggerDebug('APPROPRIATE REG DOMAIN: ' + appropriateRegDomain);
+            if (isValidRegDomain(appropriateRegDomain) && appropriateRegDomain !== currentRegDomain) {
+                applyNewRegDomain(appropriateRegDomain);
+            }
+        } else {
+            loggerInfo('Regdomain already set to: ' + currentRegDomain + ', skipping scan');
         }
     } catch(e) {
         loggerInfo('Failed to determine most appropriate reg domain: ' + e);
@@ -1804,12 +1859,12 @@ function detectAndApplyRegdomain(callback) {
     callback();
 }
 
+// Apply new wireless regulatory domain
 function applyNewRegDomain(newRegDom) {
     loggerInfo('SETTING APPROPRIATE REG DOMAIN: ' + newRegDom);
 
     try {
-        execSync("/usr/bin/sudo /sbin/ifconfig wlan0 up && /usr/bin/sudo /sbin/iw reg set " + newRegDom, { uid: 1000, gid: 1000, encoding: 'utf8'});
-        //execSync("/usr/bin/sudo /bin/echo 'REGDOMAIN=" + newRegDom + "' > /etc/default/crda", { uid: 1000, gid: 1000, encoding: 'utf8'});
+        execSync(ifconfigUp + " && " + iwRegSet + " " + newRegDom, { uid: 1000, gid: 1000, encoding: 'utf8'});
         fs.writeFileSync(CRDA_CONFIG, "REGDOMAIN=" + newRegDom);
         loggerInfo('SUCCESSFULLY SET NEW REGDOMAIN: ' + newRegDom)
     } catch(e) {
@@ -1818,6 +1873,7 @@ function applyNewRegDomain(newRegDom) {
 
 }
 
+// Validate regulatory domain format (must be 2-letter country code)
 function isValidRegDomain(regDomain) {
     if (regDomain && regDomain.length === 2) {
         return true;
@@ -1826,6 +1882,8 @@ function isValidRegDomain(regDomain) {
     }
 }
 
+// Determine most frequently occurring regulatory domain from scan results
+// Returns the country code that appears most often in beacon frames
 function determineMostAppropriateRegdomain(arr) {
     let compare = "";
     let mostFreq = "";
@@ -2028,26 +2086,31 @@ function notifyWirelessReady() {
     });
 }
 
+// Check if wlan0 interface has been released (DOWN or NO-CARRIER)
 function checkInterfaceReleased() {
     try {
-        const output = execSync('ip link show wlan0').toString();
+        const output = execSync(ipLink).toString();
         return output.includes('state DOWN') || output.includes('NO-CARRIER');
     } catch (e) {
         return false;
     }
 }
 
+// Check if configured SSID is visible in scan results
+// Used to determine if hotspot fallback should be enabled
 function isConfiguredSSIDVisible() {
     try {
         const config = getWirelessConfiguration();
         const ssid = config.wlanssid?.value;
-        const scan = execSync('/usr/bin/sudo /sbin/iw wlan0 scan | grep SSID:', { encoding: 'utf8' });
+        const scan = execSync(iwScan + " | " + GREP + " SSID:", { encoding: 'utf8' });
         return ssid && scan.includes(ssid);
     } catch (e) {
         return false;
     }
 }
 
+// Wait for interface release and start AP with retry logic
+// Prevents duplicate AP start attempts and implements exponential backoff
 function waitForInterfaceReleaseAndStartAP() {
     // Prevent duplicate calls
     if (apStartInProgress) {
