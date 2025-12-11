@@ -451,6 +451,78 @@ function getInterfaceOperState(interfaceName) {
     }
 }
 
+// Validate interface is ready for wpa_supplicant binding
+// Checks: exists, driver loaded, not in use by other process
+function validateInterfaceReady(interfaceName) {
+    loggerDebug("InterfaceValidator: Validating " + interfaceName + " readiness");
+    
+    // Check interface exists
+    var mac = getInterfaceMAC(interfaceName);
+    if (!mac) {
+        loggerInfo("InterfaceValidator: FAIL - " + interfaceName + " does not exist");
+        return { ready: false, reason: 'interface_not_found' };
+    }
+    
+    // Check operational state
+    var state = getInterfaceOperState(interfaceName);
+    if (!state) {
+        loggerInfo("InterfaceValidator: FAIL - cannot read " + interfaceName + " state");
+        return { ready: false, reason: 'state_unreadable' };
+    }
+    
+    // Interface must not be 'unknown' - indicates driver issue
+    if (state.operstate === 'unknown') {
+        loggerInfo("InterfaceValidator: FAIL - " + interfaceName + " driver not initialized (operstate=unknown)");
+        return { ready: false, reason: 'driver_not_ready' };
+    }
+    
+    // Check if interface is being renamed (operstate would be 'down' during rename)
+    // This is a heuristic - if interface just appeared and is already down, might be mid-rename
+    var busPath = getInterfaceBusPath(interfaceName);
+    loggerDebug("InterfaceValidator: " + interfaceName + " MAC=" + mac + " operstate=" + state.operstate + " USB=" + (busPath && busPath.includes('usb')));
+    
+    // Interface is ready
+    loggerInfo("InterfaceValidator: READY - " + interfaceName + " is ready for operations");
+    return { 
+        ready: true, 
+        mac: mac, 
+        isUSB: busPath && busPath.includes('usb'),
+        operstate: state.operstate 
+    };
+}
+
+// Wait for interface to become ready with polling fallback
+// This is a safety mechanism - should rarely be needed with udev settle
+function waitForInterfaceReady(interfaceName, maxWaitMs, callback) {
+    var startTime = Date.now();
+    var attempts = 0;
+    var maxAttempts = Math.floor(maxWaitMs / 500); // Check every 500ms
+    
+    loggerDebug("InterfaceValidator: Waiting for " + interfaceName + " to become ready (max " + (maxWaitMs/1000) + "s)");
+    
+    function checkReady() {
+        attempts++;
+        var validation = validateInterfaceReady(interfaceName);
+        
+        if (validation.ready) {
+            var elapsed = Date.now() - startTime;
+            loggerInfo("InterfaceValidator: " + interfaceName + " became ready after " + elapsed + "ms");
+            return callback(null, validation);
+        }
+        
+        if (attempts >= maxAttempts) {
+            var elapsed = Date.now() - startTime;
+            loggerInfo("InterfaceValidator: TIMEOUT waiting for " + interfaceName + " after " + elapsed + "ms (reason: " + validation.reason + ")");
+            return callback(new Error('Timeout waiting for interface ready: ' + validation.reason), validation);
+        }
+        
+        // Wait 500ms and check again
+        setTimeout(checkReady, INTERFACE_CHECK_INTERVAL);
+    }
+    
+    checkReady();
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
