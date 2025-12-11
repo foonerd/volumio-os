@@ -85,11 +85,9 @@ var ifconfigWlan = "ifconfig " + wlan + " up";
 var ifdeconfig = "sudo ip addr flush dev " + wlan + " && sudo ifconfig " + wlan + " down";
 var execSync = require('child_process').execSync;
 var exec = require('child_process').exec;
-var ifconfig = require('/volumio/app/plugins/system_controller/network/lib/ifconfig.js');
-var wirelessEstablishedOnceFlagFile = '/data/flagfiles/wirelessEstablishedOnce';
+var ifconfig = require(IFCONFIG_LIB);
 var wirelessWPADriver = getWirelessWPADriverString();
 var wpasupp = "wpa_supplicant -s -B -D" + wirelessWPADriver + " -c/etc/wpa_supplicant/wpa_supplicant.conf -i" + wlan;
-var ethernetStatusFile = '/data/eth0status';
 var singleNetworkMode = false;
 var isWiredNetworkActive = false;
 var currentEthStatus = 'disconnected';
@@ -505,7 +503,7 @@ function hotspotFallbackCondition() {
 
 function saveWirelessConnectionEstablished() {
     try {
-        fs.ensureFileSync(wirelessEstablishedOnceFlagFile)
+        fs.ensureFileSync(WIRELESS_ESTABLISHED_FLAG)
     } catch (e) {
         loggerDebug('Could not save Wireless Connection Established: ' + e);
     }
@@ -514,7 +512,7 @@ function saveWirelessConnectionEstablished() {
 function hasWirelessConnectionBeenEstablishedOnce() {
     var wirelessEstablished = false;
     try {
-        if (fs.existsSync(wirelessEstablishedOnceFlagFile)) {
+        if (fs.existsSync(WIRELESS_ESTABLISHED_FLAG)) {
             wirelessEstablished = true;
         }
     } catch(err) {}
@@ -630,19 +628,19 @@ function checkConcurrentModeSupport() {
 
 function startWiredNetworkingMonitor() {
     try {
-        fs.accessSync(ethernetStatusFile);
+        fs.accessSync(ETH_STATUS_FILE);
     } catch (error) {
-        fs.writeFileSync(ethernetStatusFile, 'disconnected', 'utf8');
+        fs.writeFileSync(ETH_STATUS_FILE, 'disconnected', 'utf8');
     }
     checkWiredNetworkStatus(true);
-    fs.watch(ethernetStatusFile, () => {
+    fs.watch(ETH_STATUS_FILE, () => {
         checkWiredNetworkStatus();
     });
 }
 
 function checkWiredNetworkStatus(isFirstStart) {
     try {
-        var ethstatus = fs.readFileSync(ethernetStatusFile, 'utf8').replace('\n','');
+        var ethstatus = fs.readFileSync(ETH_STATUS_FILE, 'utf8').replace('\n','');
         if (ethstatus && ethstatus !== currentEthStatus) {
             currentEthStatus = ethstatus
             loggerInfo('Wired network status changed to: ---' + ethstatus + '---');
@@ -851,3 +849,4 @@ function afterAPStart() {
         }
     }, pollingTime * 1000);
 }
+
