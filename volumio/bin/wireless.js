@@ -657,6 +657,76 @@ function isUsbWifiAdapter() {
     }
 }
 
+// Query USB WiFi adapter hardware capabilities
+function queryUsbWifiCapabilities() {
+    var capabilities = {
+        supportsAP: false,
+        supportsStation: true,
+        supportsConcurrent: false,
+        maxInterfaces: 1,
+        chipset: 'unknown'
+    };
+    
+    try {
+        var iwListOutput = execSync(iwList, { encoding: 'utf8', timeout: EXEC_TIMEOUT_LONG });
+        var modesMatch = iwListOutput.match(/Supported interface modes:([\s\S]*?)(?=\n\s*Band|$)/);
+        if (modesMatch && modesMatch[1]) {
+            capabilities.supportsAP = modesMatch[1].includes('AP');
+            capabilities.supportsStation = modesMatch[1].includes('managed') || modesMatch[1].includes('station');
+        }
+        var comboMatch = iwListOutput.match(/valid interface combinations:([\s\S]*?)(?=\n\n)/i);
+        if (comboMatch && comboMatch[1]) {
+            var hasAP = comboMatch[1].includes('AP');
+            var hasSTA = comboMatch[1].includes('station') || comboMatch[1].includes('managed');
+            capabilities.supportsConcurrent = (hasAP && hasSTA);
+        }
+        try {
+            var deviceInfo = execSync('readlink ' + SYS_CLASS_NET + '/' + wlan + '/device', { encoding: 'utf8' }).trim();
+            if (deviceInfo) capabilities.chipset = deviceInfo.split('/').pop();
+        } catch (e) {}
+    } catch (e) {
+        loggerInfo("Could not query USB capabilities: " + e);
+    }
+    return capabilities;
+}
+
+// Known chipset issues database
+function getChipsetIssues(chipset) {
+    var known = {
+        'RTL8822BU': {
+            issue: 'AP mode beacon transmission fails',
+            recommendation: 'Use station mode only'
+        }
+    };
+    for (var k in known) {
+        if (chipset.includes(k)) return known[k];
+    }
+    return null;
+}
+
+// Log USB WiFi capabilities
+function logUsbWifiCapabilities(caps) {
+    loggerInfo("USB WiFi Capabilities:");
+    loggerInfo("  Chipset: " + caps.chipset);
+    loggerInfo("  AP mode: " + (caps.supportsAP ? "Yes" : "No"));
+    loggerInfo("  Concurrent: " + (caps.supportsConcurrent ? "Yes" : "No"));
+    var issues = getChipsetIssues(caps.chipset);
+    if (issues) {
+        loggerInfo("  Known issue: " + issues.issue);
+        loggerInfo("  " + issues.recommendation);
+    }
+}
+
+// Notify user of USB limitations
+function notifyUsbWifiLimitations(caps) {
+    if (!caps.supportsAP) {
+        loggerInfo("TOAST: USB adapter does not support hotspot mode");
+    }
+    if (getChipsetIssues(caps.chipset)) {
+        loggerInfo("TOAST: Known chipset limitations detected");
+    }
+}
+
 function stopAP(callback) {
     kill(justdhclient, function(err) {
         kill(wpasupp, function(err) {
