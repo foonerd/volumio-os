@@ -237,8 +237,20 @@ function initializeWirelessDaemon() {
     retrieveEnvParameters();
     startWiredNetworkingMonitor();
     if (debug) {
-        var wpasupp = "wpa_supplicant -d -s -B -D" + wirelessWPADriver + " -c/etc/wpa_supplicant/wpa_supplicant.conf -i" + wlan;
+        var wpasupp = WPA_SUPPLICANT + " -d -s -B -D" + wirelessWPADriver + " -c" + WPA_SUPPLICANT_CONF + " -i" + wlan;
     }
+}
+
+// Main initialization entry point
+// Detects regulatory domain and starts wireless flow
+function initializeWirelessFlow() {
+    loggerInfo("Wireless.js initializing wireless flow");
+    stop(function() {
+        loggerInfo("Cleaning previous...");
+        detectAndApplyRegdomain(function() {
+            startFlow();
+        });
+    });
 }
 
 // ===================================================================
@@ -354,6 +366,8 @@ function launch(fullprocess, name, sync, callback) {
 // HOTSPOT FUNCTIONS
 // ===================================================================
 
+// Start WiFi hotspot (Access Point) mode
+// If hotspot is disabled in config, only brings interface up without hostapd
 function startHotspot(callback) {
     stopHotspot(function(err) {
         if (isHotspotDisabled()) {
@@ -408,7 +422,6 @@ function startHotspot(callback) {
 }
 
 // Force start hotspot even if disabled (used for factory reset scenarios)
-// Force start hotspot even if disabled (used for factory reset scenarios)
 function startHotspotForce(callback) {
     stopHotspot(function(err) {
         launch(ifconfigHotspot, "confighotspot", true, function(err) {
@@ -455,16 +468,161 @@ function startHotspotForce(callback) {
 }
 
 // Stop WiFi hotspot and deconfigure interface
-// Stop WiFi hotspot and deconfigure interface
 function stopHotspot(callback) {
     launch(stophostapd, "stophotspot" , true, function(err) {
         launch(ifdeconfig, "ifdeconfig", true, callback);
     });
 }
 
+// Attempt hotspot fallback with retry logic and verification
+// Retries up to hotspotMaxRetries times if hotspot fails to start
+// Verifies hostapd service is actually active after start
+function startHotspotFallbackSafe(retry = 0) {
+    const hotspotMaxRetries = 3;
+
+    function handleHotspotResult(err) {
+        if (err) {
+            loggerInfo(`Hotspot launch failed. Retry ${retry + 1} of ${hotspotMaxRetries}`);
+            if (retry + 1 < hotspotMaxRetries) {
+                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
+            } else {
+                loggerInfo("Hotspot failed after maximum retries. System remains offline.");
+                notifyWirelessReady();
+            }
+            return;
+        }
+
+        // Verify hostapd status
+        try {
+            const hostapdStatus = execSync(SYSTEMCTL + " is-active hostapd", { encoding: 'utf8' }).trim();
+            if (hostapdStatus !== "active") {
+                loggerInfo("Hostapd did not reach active state. Retrying fallback.");
+                if (retry + 1 < hotspotMaxRetries) {
+                    setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
+                } else {
+                    loggerInfo("Hostapd failed after maximum retries. System remains offline.");
+                    notifyWirelessReady();
+                }
+            } else {
+                loggerInfo("Hotspot active and hostapd is running.");
+                updateNetworkState("hotspot");
+                notifyWirelessReady();
+            }
+        } catch (e) {
+            loggerInfo("Error checking hostapd status: " + e.message);
+            if (retry + 1 < hotspotMaxRetries) {
+                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
+            } else {
+                loggerInfo("Could not confirm hostapd status. System remains offline.");
+                notifyWirelessReady();
+            }
+        }
+    }
+
+    if (!isWirelessDisabled()) {
+        if (checkConcurrentModeSupport()) {
+            loggerInfo('Fallback: Concurrent AP+STA supported. Starting hotspot.');
+            startHotspot(handleHotspotResult);
+        } else {
+            loggerInfo('Fallback: Stopping STA and starting hotspot.');
+            stopAP(function () {
+                setTimeout(() => {
+                    startHotspot(handleHotspotResult);
+                }, settleTime);
+            });
+        }
+    } else {
+        loggerInfo("Fallback: WiFi disabled. No hotspot started.");
+        notifyWirelessReady();
+    }
+}
+
 // ===================================================================
 // WIFI CLIENT (STATION MODE) FUNCTIONS
 // ===================================================================
+
+// Check if wlan0 is a USB WiFi adapter
+// Returns true if USB, false if onboard or check fails
+function isUsbWifiAdapter() {
+    try {
+        var linkPath = execSync(checkInterfaceLink, { encoding: 'utf8' }).trim();
+        return linkPath.includes('usb');
+    } catch (e) {
+        loggerDebug("Could not determine if wlan0 is USB: " + e);
+        return false;
+    }
+}
+
+// Query USB WiFi adapter hardware capabilities
+function queryUsbWifiCapabilities() {
+    var capabilities = {
+        supportsAP: false,
+        supportsStation: true,
+        supportsConcurrent: false,
+        maxInterfaces: 1,
+        chipset: 'unknown'
+    };
+    
+    try {
+        var iwListOutput = execSync(iwList, { encoding: 'utf8', timeout: EXEC_TIMEOUT_LONG });
+        var modesMatch = iwListOutput.match(/Supported interface modes:([\s\S]*?)(?=\n\s*Band|$)/);
+        if (modesMatch && modesMatch[1]) {
+            capabilities.supportsAP = modesMatch[1].includes('AP');
+            capabilities.supportsStation = modesMatch[1].includes('managed') || modesMatch[1].includes('station');
+        }
+        var comboMatch = iwListOutput.match(/valid interface combinations:([\s\S]*?)(?=\n\n)/i);
+        if (comboMatch && comboMatch[1]) {
+            var hasAP = comboMatch[1].includes('AP');
+            var hasSTA = comboMatch[1].includes('station') || comboMatch[1].includes('managed');
+            capabilities.supportsConcurrent = (hasAP && hasSTA);
+        }
+        try {
+            var deviceInfo = execSync('readlink ' + SYS_CLASS_NET + '/' + wlan + '/device', { encoding: 'utf8' }).trim();
+            if (deviceInfo) capabilities.chipset = deviceInfo.split('/').pop();
+        } catch (e) {}
+    } catch (e) {
+        loggerInfo("Could not query USB capabilities: " + e);
+    }
+    return capabilities;
+}
+
+// Known chipset issues database
+function getChipsetIssues(chipset) {
+    var known = {
+        'RTL8822BU': {
+            issue: 'AP mode beacon transmission fails',
+            recommendation: 'Use station mode only'
+        }
+    };
+    for (var k in known) {
+        if (chipset.includes(k)) return known[k];
+    }
+    return null;
+}
+
+// Log USB WiFi capabilities
+function logUsbWifiCapabilities(caps) {
+    loggerInfo("USB WiFi Capabilities:");
+    loggerInfo("  Chipset: " + caps.chipset);
+    loggerInfo("  AP mode: " + (caps.supportsAP ? "Yes" : "No"));
+    loggerInfo("  Concurrent: " + (caps.supportsConcurrent ? "Yes" : "No"));
+    var issues = getChipsetIssues(caps.chipset);
+    if (issues) {
+        loggerInfo("  Known issue: " + issues.issue);
+        loggerInfo("  " + issues.recommendation);
+    }
+}
+
+// Notify user of USB limitations
+function notifyUsbWifiLimitations(caps) {
+    if (!caps.supportsAP) {
+        loggerInfo("TOAST: USB adapter does not support hotspot mode");
+    }
+    if (getChipsetIssues(caps.chipset)) {
+        loggerInfo("TOAST: Known chipset limitations detected");
+    }
+}
+
 
 // Start WiFi client (station) mode - connects to configured AP
 // VERSION 19 - STAGE 1 INTEGRATION:
@@ -1190,88 +1348,6 @@ function getFailureExplanation(reason) {
     return explanations[reason] || 'Unknown failure: ' + reason;
 }
 
-// Check if wlan0 is a USB WiFi adapter
-// Returns true if USB, false if onboard or check fails
-function isUsbWifiAdapter() {
-    try {
-        var linkPath = execSync(checkInterfaceLink, { encoding: 'utf8' }).trim();
-        return linkPath.includes('usb');
-    } catch (e) {
-        loggerDebug("Could not determine if wlan0 is USB: " + e);
-        return false;
-    }
-}
-
-// Query USB WiFi adapter hardware capabilities
-function queryUsbWifiCapabilities() {
-    var capabilities = {
-        supportsAP: false,
-        supportsStation: true,
-        supportsConcurrent: false,
-        maxInterfaces: 1,
-        chipset: 'unknown'
-    };
-    
-    try {
-        var iwListOutput = execSync(iwList, { encoding: 'utf8', timeout: EXEC_TIMEOUT_LONG });
-        var modesMatch = iwListOutput.match(/Supported interface modes:([\s\S]*?)(?=\n\s*Band|$)/);
-        if (modesMatch && modesMatch[1]) {
-            capabilities.supportsAP = modesMatch[1].includes('AP');
-            capabilities.supportsStation = modesMatch[1].includes('managed') || modesMatch[1].includes('station');
-        }
-        var comboMatch = iwListOutput.match(/valid interface combinations:([\s\S]*?)(?=\n\n)/i);
-        if (comboMatch && comboMatch[1]) {
-            var hasAP = comboMatch[1].includes('AP');
-            var hasSTA = comboMatch[1].includes('station') || comboMatch[1].includes('managed');
-            capabilities.supportsConcurrent = (hasAP && hasSTA);
-        }
-        try {
-            var deviceInfo = execSync('readlink ' + SYS_CLASS_NET + '/' + wlan + '/device', { encoding: 'utf8' }).trim();
-            if (deviceInfo) capabilities.chipset = deviceInfo.split('/').pop();
-        } catch (e) {}
-    } catch (e) {
-        loggerInfo("Could not query USB capabilities: " + e);
-    }
-    return capabilities;
-}
-
-// Known chipset issues database
-function getChipsetIssues(chipset) {
-    var known = {
-        'RTL8822BU': {
-            issue: 'AP mode beacon transmission fails',
-            recommendation: 'Use station mode only'
-        }
-    };
-    for (var k in known) {
-        if (chipset.includes(k)) return known[k];
-    }
-    return null;
-}
-
-// Log USB WiFi capabilities
-function logUsbWifiCapabilities(caps) {
-    loggerInfo("USB WiFi Capabilities:");
-    loggerInfo("  Chipset: " + caps.chipset);
-    loggerInfo("  AP mode: " + (caps.supportsAP ? "Yes" : "No"));
-    loggerInfo("  Concurrent: " + (caps.supportsConcurrent ? "Yes" : "No"));
-    var issues = getChipsetIssues(caps.chipset);
-    if (issues) {
-        loggerInfo("  Known issue: " + issues.issue);
-        loggerInfo("  " + issues.recommendation);
-    }
-}
-
-// Notify user of USB limitations
-function notifyUsbWifiLimitations(caps) {
-    if (!caps.supportsAP) {
-        loggerInfo("TOAST: USB adapter does not support hotspot mode");
-    }
-    if (getChipsetIssues(caps.chipset)) {
-        loggerInfo("TOAST: Known chipset limitations detected");
-    }
-}
-
 // Stop WiFi client mode by killing dhcpcd and wpa_supplicant
 function stopAP(callback) {
     // Use interface-specific patterns to avoid killing eth0 dhcpcd
@@ -1390,69 +1466,6 @@ function startFlow() {
     } else {
         loggerInfo("Start wireless flow");
         waitForInterfaceReleaseAndStartAP();
-    }
-}
-
-// Attempt hotspot fallback with retry logic and verification
-// Retries up to hotspotMaxRetries times if hotspot fails to start
-// Verifies hostapd service is actually active after start
-function startHotspotFallbackSafe(retry = 0) {
-    const hotspotMaxRetries = 3;
-
-    function handleHotspotResult(err) {
-        if (err) {
-            loggerInfo(`Hotspot launch failed. Retry ${retry + 1} of ${hotspotMaxRetries}`);
-            if (retry + 1 < hotspotMaxRetries) {
-                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
-            } else {
-                loggerInfo("Hotspot failed after maximum retries. System remains offline.");
-                notifyWirelessReady();
-            }
-            return;
-        }
-
-        // Verify hostapd status
-        try {
-            const hostapdStatus = execSync(SYSTEMCTL + " is-active hostapd", { encoding: 'utf8' }).trim();
-            if (hostapdStatus !== "active") {
-                loggerInfo("Hostapd did not reach active state. Retrying fallback.");
-                if (retry + 1 < hotspotMaxRetries) {
-                    setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
-                } else {
-                    loggerInfo("Hostapd failed after maximum retries. System remains offline.");
-                    notifyWirelessReady();
-                }
-            } else {
-                loggerInfo("Hotspot active and hostapd is running.");
-                updateNetworkState("hotspot");
-                notifyWirelessReady();
-            }
-        } catch (e) {
-            loggerInfo("Error checking hostapd status: " + e.message);
-            if (retry + 1 < hotspotMaxRetries) {
-                setTimeout(() => startHotspotFallbackSafe(retry + 1), HOTSPOT_RETRY_DELAY);
-            } else {
-                loggerInfo("Could not confirm hostapd status. System remains offline.");
-                notifyWirelessReady();
-            }
-        }
-    }
-
-    if (!isWirelessDisabled()) {
-        if (checkConcurrentModeSupport()) {
-            loggerInfo('Fallback: Concurrent AP+STA supported. Starting hotspot.');
-            startHotspot(handleHotspotResult);
-        } else {
-            loggerInfo('Fallback: Stopping STA and starting hotspot.');
-            stopAP(function () {
-                setTimeout(() => {
-                    startHotspot(handleHotspotResult);
-                }, settleTime);
-            });
-        }
-    } else {
-        loggerInfo("Fallback: WiFi disabled. No hotspot started.");
-        notifyWirelessReady();
     }
 }
 
@@ -1701,16 +1714,6 @@ function reconnectWiFiAfterEthernet(callback) {
 if ( ! fs.existsSync(SYS_CLASS_NET + "/" + wlan + "/operstate") ) {
     loggerInfo("ERROR: " + wlan + " does not exist, exiting...");
     process.exit(1);
-}
-
-function initializeWirelessFlow() {
-    loggerInfo("Wireless.js initializing wireless flow");
-    stop(function() {
-        loggerInfo("Cleaning previous...");
-        detectAndApplyRegdomain(function() {
-            startFlow();
-        });
-    });
 }
 
 // Check network status for diagnostics
