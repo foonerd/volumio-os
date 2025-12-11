@@ -483,6 +483,120 @@ function stop(callback) {
     });
 }
 
+// Reconnect WiFi after ethernet disconnect in Single Network Mode
+// Uses wpa_cli reconnect for fast transition without full flow restart
+function reconnectWiFiAfterEthernet(callback) {
+    loggerInfo("SNM: Ethernet disconnected, reconnecting WiFi");
+    
+    // Check if wpa_supplicant is running
+    try {
+        var wpaCheck = execSync(PGREP + " -f 'wpa_supplicant.*" + wlan + "'", { 
+            encoding: 'utf8',
+            timeout: EXEC_TIMEOUT_SHORT 
+        });
+        loggerDebug("reconnectWiFi: wpa_supplicant already running: " + wpaCheck.trim());
+    } catch (e) {
+        // wpa_supplicant not running, need to start it
+        loggerInfo("reconnectWiFi: wpa_supplicant not running, starting full wireless flow");
+        return initializeWirelessFlow();
+    }
+    
+    // wpa_supplicant is running, just reconnect
+    var reconnectCmd = wpacli + " reconnect";
+    launch(reconnectCmd, "wpa_reconnect", true, function(err) {
+        if (err) {
+            loggerInfo("reconnectWiFi: Reconnect command failed: " + err);
+            loggerInfo("reconnectWiFi: Falling back to full wireless flow restart");
+            wirelessFlowInProgress = false;  // Reset to allow restart
+            return initializeWirelessFlow();
+        }
+        
+        loggerInfo("reconnectWiFi: WiFi reconnection triggered");
+        
+        // Wait for connection to establish before launching dhcpcd
+        // Give wpa_supplicant time to associate and authenticate
+        setTimeout(function() {
+            // Check connection state
+            try {
+                var wpaState = execSync(wpacli + " status | " + GREP + " wpa_state", {
+                    encoding: 'utf8',
+                    timeout: EXEC_TIMEOUT_SHORT
+                }).trim();
+                
+                loggerDebug("reconnectWiFi: WiFi state after reconnect: " + wpaState);
+                
+                if (wpaState.includes("COMPLETED")) {
+                    loggerInfo("reconnectWiFi: WiFi reconnected successfully");
+                    
+                    // Check if this is a USB WiFi adapter
+                    if (isUsbWifiAdapter()) {
+                        // FIX v4.0-rc3: Use dhcpcd -n to force fresh lease instead of service restart
+                        // Service restart may attempt to rebind old/expired lease which can fail or timeout
+                        // The -n flag forces new DISCOVER/REQUEST cycle instead of rebind attempt
+                        loggerInfo("reconnectWiFi: USB adapter detected, requesting fresh DHCP lease");
+                        try {
+                            var freshDhcpCmd = SUDO + ' ' + DHCPCD + ' -n ' + wlan;
+                            execSync(freshDhcpCmd, { encoding: 'utf8', timeout: EXEC_TIMEOUT_LONG });
+                            loggerDebug("reconnectWiFi: Fresh DHCP lease requested for " + wlan);
+                        } catch (e) {
+                            loggerInfo("reconnectWiFi: WARNING - Failed to request fresh DHCP: " + e);
+                        }
+                        setTimeout(function() {
+                            // Calculate transition time for diagnostics
+                            if (transitionStartTime > 0) {
+                                var reconnectTime = Date.now() - transitionStartTime;
+                                loggerInfo("SNM: WiFi reconnection completed in " + reconnectTime + "ms");
+                                transitionStartTime = 0;
+                            }
+                            
+                            loggerInfo("reconnectWiFi: WiFi reconnection complete with USB adapter");
+                            updateNetworkState("ap");
+                            restartAvahi();
+                            if (callback) callback(null);
+                        }, USB_SETTLE_WAIT);
+                    } else {
+                        // Launch dhcpcd to get IP address
+                        let staticDhcpFile;
+                        try {
+                            staticDhcpFile = fs.readFileSync(WLAN_STATIC, 'utf8');
+                            loggerInfo("reconnectWiFi: Using static IP configuration");
+                        } catch (e) {
+                            staticDhcpFile = dhclient;
+                            loggerInfo("reconnectWiFi: Using DHCP for IP");
+                        }
+                        
+                        launch(staticDhcpFile, "dhclient", false, function() {
+                            // Calculate transition time for diagnostics
+                            if (transitionStartTime > 0) {
+                                var reconnectTime = Date.now() - transitionStartTime;
+                                loggerInfo("SNM: WiFi reconnection completed in " + reconnectTime + "ms");
+                                transitionStartTime = 0;
+                            }
+                            
+                            loggerInfo("reconnectWiFi: WiFi reconnection complete, obtaining IP");
+                            updateNetworkState("ap");
+                            restartAvahi();
+                            if (callback) callback(null);
+                        });
+                    }
+                    
+                } else {
+                    loggerInfo("reconnectWiFi: WiFi reconnect incomplete (" + wpaState + "), reinitializing wireless flow");
+                    wirelessFlowInProgress = false;  // Reset to allow restart
+                    initializeWirelessFlow();
+                }
+                
+            } catch (e) {
+                loggerInfo("reconnectWiFi: Could not verify WiFi state: " + e);
+                loggerInfo("reconnectWiFi: Falling back to full wireless flow");
+                wirelessFlowInProgress = false;  // Reset to allow restart
+                initializeWirelessFlow();
+            }
+            
+        }, RECONNECT_WAIT); // Wait for wpa_supplicant association
+    });
+}
+
 if ( ! fs.existsSync("/sys/class/net/" + wlan + "/operstate") ) {
     loggerInfo("No wireless interface, exiting");
     process.exit(0);
