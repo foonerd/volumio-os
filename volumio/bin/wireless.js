@@ -4,10 +4,10 @@
 // Volumio Network Manager
 // Original Copyright: Michelangelo Guarise - Volumio.org
 // Maintainer: Just a Nerd
-// Volumio Wireless Daemon - Version 4.0-rc3
+// Volumio Wireless Daemon - Version 4.0-rc4
 // Maintainer: Development Team
 // 
-// RELEASE CANDIDATE 3 - DHCP Reconnection Fix
+// RELEASE CANDIDATE 4 - First Boot Hotspot Interface Readiness
 // 
 // Major Changes in v4.0:
 // - Single Network Mode (SNM) with ethernet/WiFi coordination
@@ -16,14 +16,20 @@
 // - Fixed deadlock and infinite loop issues
 // - Enhanced logging and diagnostics
 //
+// RC4 Changes (First Boot Hotspot Fix):
+// - Add interface readiness check before starting hotspot on first boot
+// - Uses same waitForUdevSettle/waitForInterfaceReady as STA mode
+// - Fixes USB WiFi adapters not transmitting beacons on cold boot
+// - Added INTERFACE_READY_TIMEOUT constant (8s)
+//
 // RC3 Changes (DHCP Reconnection Fix):
 // - Release DHCP lease before ethernet transition (prevents stale lease)
 // - Force fresh DHCP request on WiFi reconnect (prevents rebind timeout)
 // - Eliminates 50-second DHCP timeout after ethernet unplug
 // - Fixes WiFi reconnection failure causing hotspot fallback
-// - Add reconnectWiFiAfterEthernet() for fast WiFi reconnection
-// - Rewrite checkWiredNetworkStatus() with carrier check
+// - Fixed regdomain log output showing on two lines (cosmetic)
 //
+// Production release: v4.0-rc4
 //===================================================================
 
 // ===================================================================
@@ -75,7 +81,7 @@ var TR = "tr";
 // System paths
 var VOLUMIO_ENV = "/volumio/.env";
 var OS_RELEASE = "/etc/os-release";
-var CRDA_CONFIG = CRDA_CONFIG;
+var CRDA_CONFIG = "/etc/default/crda";
 var WPA_SUPPLICANT_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf";
 
 // Data paths
@@ -101,26 +107,26 @@ var SYS_CLASS_NET = "/sys/class/net";
 var VOLUMIO_PLUGINS = "/volumio/app/plugins";
 var IFCONFIG_LIB = VOLUMIO_PLUGINS + "/system_controller/network/lib/ifconfig.js";
 
-var fs = require('fs-extra')
-var thus = require('child_process');
+// ===================================================================
+// INTERFACE NAMES
+// ===================================================================
 var wlan = "wlan0";
 var eth = "eth0";
-// var dhcpd = "dhcpd";
+
+// ===================================================================
+// COMPOSED COMMANDS - Built from binary paths above
+// ===================================================================
 var dhclient = SUDO + " " + DHCPCD + " " + wlan;
 var justdhclient = DHCPCD + ".*" + wlan;  // Pattern for killing wlan0 dhcpcd only
+var wpasupp = WPA_SUPPLICANT + " -s -B -D" + wirelessWPADriver + " -c" + WPA_SUPPLICANT_CONF + " -i" + wlan;
+var wpasuppPattern = WPA_SUPPLICANT + ".*" + wlan;  // Pattern for killing wlan0 wpa_supplicant only
+var restartdhcpcd = SUDO + " " + SYSTEMCTL + " restart dhcpcd.service";
 var starthostapd = SYSTEMCTL + " start hostapd.service";
 var stophostapd = SYSTEMCTL + " stop hostapd.service";
 var ifconfigHotspot = IFCONFIG + " " + wlan + " 192.168.211.1 up";
 var ifconfigWlan = IFCONFIG + " " + wlan + " up";
-var ifdeconfig = SUDO + " " + IP + " addr flush dev " + wlan + " && " + SUDO + " " + IFCONFIG + " " + wlan + " down";
-var execSync = require('child_process').execSync;
-var exec = require('child_process').exec;
-var ifconfig = require(IFCONFIG_LIB);
-var wirelessWPADriver = getWirelessWPADriverString();
-var wpasupp = WPA_SUPPLICANT + " -s -B -D" + wirelessWPADriver + " -c" + WPA_SUPPLICANT_CONF + " -i" + wlan;
-var wpasuppPattern = WPA_SUPPLICANT + ".*" + wlan;  // Pattern for killing wlan0 wpa_supplicant only
-var restartdhcpcd = SUDO + " " + SYSTEMCTL + " restart dhcpcd.service";
 var ifconfigUp = SUDO + " " + IFCONFIG + " " + wlan + " up";
+var ifdeconfig = SUDO + " " + IP + " addr flush dev " + wlan + " && " + SUDO + " " + IFCONFIG + " " + wlan + " down";
 var iwgetid = SUDO + " " + IWGETID + " -r";
 var wpacli = WPA_CLI + " -i " + wlan;
 var iwRegGet = SUDO + " " + IW + " reg get";
@@ -130,6 +136,21 @@ var iwList = IW + " list";
 var ipLink = IP + " link show " + wlan;
 var ipAddr = IP + " addr show " + wlan;
 var checkInterfaceLink = "readlink " + SYS_CLASS_NET + "/" + wlan;
+
+// ===================================================================
+// NODE MODULES
+// ===================================================================
+var fs = require('fs-extra')
+var thus = require('child_process');
+var execSync = require('child_process').execSync;
+var exec = require('child_process').exec;
+var ifconfig = require(IFCONFIG_LIB);
+
+// ===================================================================
+// WIRELESS CONFIGURATION
+// ===================================================================
+var wirelessWPADriver = getWirelessWPADriverString();
+var wpasupp = WPA_SUPPLICANT + " -s -B -D" + wirelessWPADriver + " -c" + WPA_SUPPLICANT_CONF + " -i" + wlan;
 
 // ===================================================================
 // WPA STATE MACHINE CONSTANTS (STAGE 2)
@@ -207,6 +228,11 @@ if (process.argv.length < 2) {
     }
 }
 
+// ===================================================================
+// INITIALIZATION FUNCTIONS
+// ===================================================================
+
+// Initialize wireless daemon by retrieving environment parameters and starting monitoring
 function initializeWirelessDaemon() {
     retrieveEnvParameters();
     startWiredNetworkingMonitor();
@@ -215,6 +241,13 @@ function initializeWirelessDaemon() {
     }
 }
 
+// ===================================================================
+// PROCESS MANAGEMENT FUNCTIONS
+// ===================================================================
+
+// Kill a process by pattern using pkill
+// Use pkill to terminate processes matching pattern
+// Patterns should be interface-specific (e.g., "dhcpcd.*wlan0", "wpa_supplicant.*wlan0")
 function kill(pattern, callback) {
     loggerDebug("kill(): Pattern: " + pattern);
     
@@ -317,6 +350,9 @@ function launch(fullprocess, name, sync, callback) {
     return
 }
 
+// ===================================================================
+// HOTSPOT FUNCTIONS
+// ===================================================================
 
 function startHotspot(callback) {
     stopHotspot(function(err) {
@@ -419,11 +455,16 @@ function startHotspotForce(callback) {
 }
 
 // Stop WiFi hotspot and deconfigure interface
+// Stop WiFi hotspot and deconfigure interface
 function stopHotspot(callback) {
     launch(stophostapd, "stophotspot" , true, function(err) {
         launch(ifdeconfig, "ifdeconfig", true, callback);
     });
 }
+
+// ===================================================================
+// WIFI CLIENT (STATION MODE) FUNCTIONS
+// ===================================================================
 
 // Start WiFi client (station) mode - connects to configured AP
 // VERSION 19 - STAGE 1 INTEGRATION:
@@ -1260,6 +1301,10 @@ function stopAP(callback) {
     });
 }
 
+// ===================================================================
+// FLOW CONTROL FUNCTIONS
+// ===================================================================
+
 // Main wireless flow initialization
 // Handles various startup scenarios:
 // - Forced hotspot mode (/tmp/forcehotspot)
@@ -1649,9 +1694,13 @@ function reconnectWiFiAfterEthernet(callback) {
     });
 }
 
-if ( ! fs.existsSync("/sys/class/net/" + wlan + "/operstate") ) {
-    loggerInfo("No wireless interface, exiting");
-    process.exit(0);
+// ===================================================================
+// INTERFACE VALIDATION
+// ===================================================================
+
+if ( ! fs.existsSync(SYS_CLASS_NET + "/" + wlan + "/operstate") ) {
+    loggerInfo("ERROR: " + wlan + " does not exist, exiting...");
+    process.exit(1);
 }
 
 function initializeWirelessFlow() {
@@ -1712,6 +1761,10 @@ function updateNetworkState(state) {
     wstatus(state);
     refreshNetworkStatusFile();
 }
+
+// ===================================================================
+// LOGGING FUNCTIONS
+// ===================================================================
 
 // Logging helper - outputs to both console and /tmp/wireless.log
 function loggerDebug(message) {
@@ -1826,6 +1879,10 @@ function getWirelessWPADriverString() {
     }
 }
 
+// ===================================================================
+// REGULATORY DOMAIN FUNCTIONS
+// ===================================================================
+
 // Auto-detect and apply wireless regulatory domain
 // Scans for country codes in beacon frames and sets the most common one
 function detectAndApplyRegdomain(callback) {
@@ -1905,6 +1962,10 @@ function determineMostAppropriateRegdomain(arr) {
     return mostFreq;
 }
 
+// ===================================================================
+// CONCURRENT MODE SUPPORT
+// ===================================================================
+
 function checkConcurrentModeSupport() {
     try {
         const output = execSync('iw list', { encoding: 'utf8' });
@@ -1933,6 +1994,10 @@ function checkConcurrentModeSupport() {
         return false;
     }
 }
+
+// ===================================================================
+// ETHERNET MONITORING (Single Network Mode)
+// ===================================================================
 
 function startWiredNetworkingMonitor() {
     try {
@@ -2085,6 +2150,10 @@ function notifyWirelessReady() {
         }
     });
 }
+
+// ===================================================================
+// UTILITY FUNCTIONS
+// ===================================================================
 
 // Check if wlan0 interface has been released (DOWN or NO-CARRIER)
 function checkInterfaceReleased() {
