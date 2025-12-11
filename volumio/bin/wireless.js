@@ -1,6 +1,31 @@
 #!/usr/bin/env node
 
-//Volumio Network Manager - Copyright Michelangelo Guarise - Volumio.org
+//===================================================================
+// Volumio Network Manager
+// Original Copyright: Michelangelo Guarise - Volumio.org
+// Maintainer: Just a Nerd
+// Volumio Wireless Daemon - Version 4.0-rc1
+// Maintainer: Development Team
+// 
+// RELEASE CANDIDATE 1 - Core Infrastructure
+// 
+// Major Changes in v4.0:
+// - Single Network Mode (SNM) with ethernet/WiFi coordination
+// - Emergency hotspot fallback when no network available
+// - Improved transition handling and state management
+// - Fixed deadlock and infinite loop issues
+// - Enhanced logging and diagnostics
+//
+// RC1 Changes (Core Infrastructure):
+// - Constants reorganization (timeouts, binaries, paths)
+// - Rewrite kill() to use pkill with timeout protection
+// - Add setImmediate() to prevent fs.watch() deadlock
+// - Add wirelessFlowInProgress to prevent duplicate flows
+// - Add clearConnectionTimer() for centralized timer cleanup
+// - Enable Single Network Mode by default
+// - Add isUsbWifiAdapter() detection function
+//
+//===================================================================
 
 // ===================================================================
 // TIMEOUT CONSTANTS - Single source of truth for all timeout values
