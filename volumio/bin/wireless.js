@@ -841,22 +841,119 @@ function startWiredNetworkingMonitor() {
 
 function checkWiredNetworkStatus(isFirstStart) {
     try {
-        var ethstatus = fs.readFileSync(ETH_STATUS_FILE, 'utf8').replace('\n','');
-        if (ethstatus && ethstatus !== currentEthStatus) {
-            currentEthStatus = ethstatus
-            loggerInfo('Wired network status changed to: ---' + ethstatus + '---');
-            if (ethstatus === 'connected') {
-                isWiredNetworkActive = true;
-            } else {
-                isWiredNetworkActive = false;
+        // Validate actual hardware state
+        var actualState = 'disconnected';
+        try {
+            var carrier = fs.readFileSync('/sys/class/net/eth0/carrier', 'utf8').trim();
+            if (carrier === '1') {
+                actualState = 'connected';
             }
-            if (!isFirstStart && singleNetworkMode) {
-                setImmediate(function() {
-                    initializeWirelessFlow();
-                });
+        } catch (e) {
+            actualState = 'disconnected';
+        }
+        
+        // Check if state changed BEFORE writing to file
+        // Writing to file triggers fs.watch() callback - only write when state actually changes
+        if (actualState !== currentEthStatus) {
+            // Update file ONLY when state changes (prevents infinite loop)
+            try {
+                fs.writeFileSync(ETH_STATUS_FILE, actualState, 'utf8');
+            } catch (e) {
+                loggerDebug('Could not update eth0status: ' + e);
+            }
+            
+            // Start timing transition for diagnostics
+            transitionStartTime = Date.now();
+            
+            // Enhanced transition logging
+            loggerInfo("=== SNM TRANSITION ===");
+            loggerInfo("Previous ethernet state: " + currentEthStatus);
+            loggerInfo("New ethernet state: " + actualState);
+            loggerInfo("Single Network Mode: " + (singleNetworkMode ? "enabled" : "disabled"));
+            loggerInfo("First start: " + (isFirstStart ? "yes" : "no"));
+            
+            currentEthStatus = actualState;
+            
+            if (actualState === 'connected') {
+                // Ethernet connected
+                isWiredNetworkActive = true;
+                loggerInfo("Action: Switch to ethernet (WiFi scan mode)");
+                loggerInfo("=== END TRANSITION ===");
+                
+                if (!isFirstStart && singleNetworkMode) {
+                    loggerInfo('SNM: Ethernet connected, switching to ethernet (WiFi scan mode)');
+                    
+                    // FIX v4.0-rc3: Release wlan0 DHCP lease before transition to prevent stale lease rebind
+                    // When reconnecting later, dhcpcd will request fresh lease instead of trying to rebind
+                    // expired lease which can fail or timeout on some routers
+                    try {
+                        loggerDebug('SNM: Releasing wlan0 DHCP lease before ethernet transition');
+                        execSync(SUDO + ' ' + DHCPCD + ' -k ' + wlan, { 
+                            encoding: 'utf8', 
+                            timeout: EXEC_TIMEOUT_SHORT 
+                        });
+                        loggerDebug('SNM: wlan0 DHCP lease released successfully');
+                    } catch (e) {
+                        // Non-fatal - may not have active lease
+                        loggerDebug('SNM: DHCP release skipped (no active lease): ' + e.message);
+                    }
+                    
+                    // Use setImmediate to break out of fs.watch() callback context
+                    // Direct call causes deadlock in thus.exec()
+                    loggerDebug('SNM: Scheduling wireless flow restart via setImmediate()');
+                    setImmediate(function() {
+                        loggerDebug('SNM: setImmediate() callback FIRED - calling initializeWirelessFlow()');
+                        try {
+                            initializeWirelessFlow();
+                        } catch (e) {
+                            loggerInfo('SNM: ERROR in initializeWirelessFlow(): ' + e);
+                            loggerInfo('SNM: Stack: ' + e.stack);
+                        }
+                    });
+                    loggerDebug('SNM: setImmediate() scheduled, continuing...');
+                }
+                
+            } else {
+                // Ethernet disconnected
+                isWiredNetworkActive = false;
+                loggerInfo("Action: Reconnect WiFi");
+                loggerInfo("=== END TRANSITION ===");
+                
+                if (!isFirstStart && singleNetworkMode) {
+                    // Check if WiFi is already connected
+                    try {
+                        var wifiSSID = execSync(iwgetid, { uid: 1000, gid: 1000, encoding: 'utf8' }).replace('\n','');
+                        if (wifiSSID && wifiSSID.length > 0) {
+                            loggerInfo('SNM: WiFi already connected to: ' + wifiSSID);
+                            return;
+                        }
+                    } catch (e) {
+                        loggerDebug('SNM: Could not check WiFi status: ' + e);
+                    }
+                    
+                    // WiFi not connected, trigger reconnection
+                    loggerInfo('SNM: Ethernet disconnected, reconnecting WiFi');
+                    // Use setImmediate to break out of fs.watch() callback context
+                    loggerDebug('SNM: Scheduling WiFi reconnect via setImmediate()');
+                    setImmediate(function() {
+                        loggerDebug('SNM: setImmediate() callback FIRED - calling reconnectWiFiAfterEthernet()');
+                        try {
+                            reconnectWiFiAfterEthernet();
+                        } catch (e) {
+                            loggerInfo('SNM: ERROR in reconnectWiFiAfterEthernet(): ' + e);
+                            loggerInfo('SNM: Stack: ' + e.stack);
+                        }
+                    });
+                    loggerDebug('SNM: setImmediate() scheduled, continuing...');
+                }
             }
         }
-    } catch (e) {}
+        
+        loggerDebug('checkWiredNetworkStatus: Function complete');
+    } catch (e) {
+        loggerInfo('Error in checkWiredNetworkStatus: ' + e);
+        loggerInfo('Stack: ' + e.stack);
+    }
 }
 
 function retrieveEnvParameters() {
