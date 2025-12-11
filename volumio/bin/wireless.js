@@ -346,6 +346,51 @@ function clearConnectionTimer() {
     }
 }
 
+// ===================================================================
+// STAGE 1 MODULES: INTERFACE IDENTITY & STATE TRACKING
+// ===================================================================
+
+// ===================================================================
+// MODULE 1: UDEV COORDINATOR
+// Synchronizes with udev rename operations and device initialization
+// ===================================================================
+
+// Wait for udev to complete all pending events
+// Returns immediately if no events pending
+function waitForUdevSettle(timeout, callback) {
+    timeout = timeout || 10000; // 10 second default max wait
+    var timeoutSeconds = Math.floor(timeout / 1000);
+    
+    loggerDebug("UdevCoordinator: Waiting for udev to settle (max " + timeoutSeconds + "s)");
+    
+    try {
+        var startTime = Date.now();
+        execSync('udevadm settle --timeout=' + timeoutSeconds, { 
+            encoding: 'utf8', 
+            timeout: timeout 
+        });
+        var elapsed = Date.now() - startTime;
+        loggerDebug("UdevCoordinator: udev settled in " + elapsed + "ms");
+        callback(null);
+    } catch (e) {
+        loggerInfo("UdevCoordinator: udev settle timeout or error: " + e);
+        // Not fatal - proceed anyway, validation will catch issues
+        callback(null);
+    }
+}
+
+// Check if udev queue is empty (no pending events)
+function isUdevQueueEmpty() {
+    try {
+        var result = execSync('udevadm settle --timeout=0', { encoding: 'utf8' });
+        loggerDebug("UdevCoordinator: udev queue is empty");
+        return true;
+    } catch (e) {
+        loggerDebug("UdevCoordinator: udev queue has pending events");
+        return false;
+    }
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
