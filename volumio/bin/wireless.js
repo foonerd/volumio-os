@@ -391,6 +391,66 @@ function isUdevQueueEmpty() {
     }
 }
 
+// ===================================================================
+// MODULE 2: INTERFACE VALIDATOR
+// Verifies interface physical identity and operational readiness
+// ===================================================================
+
+// Get current physical identity of wlan0 (MAC address)
+// Returns null if interface doesn't exist
+function getInterfaceMAC(interfaceName) {
+    try {
+        var mac = fs.readFileSync('/sys/class/net/' + interfaceName + '/address', 'utf8').trim();
+        return mac;
+    } catch (e) {
+        loggerDebug("InterfaceValidator: Cannot read MAC for " + interfaceName + ": " + e);
+        return null;
+    }
+}
+
+// Get physical bus path (determines if USB or onboard)
+// Returns path like "../../devices/platform/..." or null
+function getInterfaceBusPath(interfaceName) {
+    try {
+        var linkPath = fs.readlinkSync('/sys/class/net/' + interfaceName).trim();
+        return linkPath;
+    } catch (e) {
+        loggerDebug("InterfaceValidator: Cannot read bus path for " + interfaceName + ": " + e);
+        return null;
+    }
+}
+
+// Check if interface is USB device
+function isInterfaceUSB(interfaceName) {
+    var busPath = getInterfaceBusPath(interfaceName);
+    if (!busPath) return false;
+    return busPath.includes('usb');
+}
+
+// Get interface operational state flags
+// Returns object with state information or null
+function getInterfaceOperState(interfaceName) {
+    try {
+        var operstate = fs.readFileSync('/sys/class/net/' + interfaceName + '/operstate', 'utf8').trim();
+        var flags = fs.readFileSync('/sys/class/net/' + interfaceName + '/flags', 'utf8').trim();
+        var carrier = '0';
+        try {
+            carrier = fs.readFileSync('/sys/class/net/' + interfaceName + '/carrier', 'utf8').trim();
+        } catch (e) {
+            // Carrier file doesn't exist if interface is down
+        }
+        
+        return {
+            operstate: operstate,      // 'up', 'down', 'unknown', 'dormant'
+            flags: parseInt(flags, 16), // Hex flags
+            carrier: carrier === '1'    // Physical link present
+        };
+    } catch (e) {
+        loggerDebug("InterfaceValidator: Cannot read operstate for " + interfaceName + ": " + e);
+        return null;
+    }
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
