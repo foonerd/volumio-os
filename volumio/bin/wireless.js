@@ -4,10 +4,10 @@
 // Volumio Network Manager
 // Original Copyright: Michelangelo Guarise - Volumio.org
 // Maintainer: Just a Nerd
-// Volumio Wireless Daemon - Version 4.0-rc1
+// Volumio Wireless Daemon - Version 4.0-rc3
 // Maintainer: Development Team
 // 
-// RELEASE CANDIDATE 1 - Core Infrastructure
+// RELEASE CANDIDATE 3 - DHCP Reconnection Fix
 // 
 // Major Changes in v4.0:
 // - Single Network Mode (SNM) with ethernet/WiFi coordination
@@ -16,14 +16,13 @@
 // - Fixed deadlock and infinite loop issues
 // - Enhanced logging and diagnostics
 //
-// RC1 Changes (Core Infrastructure):
-// - Constants reorganization (timeouts, binaries, paths)
-// - Rewrite kill() to use pkill with timeout protection
-// - Add setImmediate() to prevent fs.watch() deadlock
-// - Add wirelessFlowInProgress to prevent duplicate flows
-// - Add clearConnectionTimer() for centralized timer cleanup
-// - Enable Single Network Mode by default
-// - Add isUsbWifiAdapter() detection function
+// RC3 Changes (DHCP Reconnection Fix):
+// - Release DHCP lease before ethernet transition (prevents stale lease)
+// - Force fresh DHCP request on WiFi reconnect (prevents rebind timeout)
+// - Eliminates 50-second DHCP timeout after ethernet unplug
+// - Fixes WiFi reconnection failure causing hotspot fallback
+// - Add reconnectWiFiAfterEthernet() for fast WiFi reconnection
+// - Rewrite checkWiredNetworkStatus() with carrier check
 //
 //===================================================================
 
