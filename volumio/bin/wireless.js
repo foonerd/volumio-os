@@ -583,7 +583,9 @@ function checkWiredNetworkStatus(isFirstStart) {
                 isWiredNetworkActive = false;
             }
             if (!isFirstStart && singleNetworkMode) {
-                initializeWirelessFlow();
+                setImmediate(function() {
+                    initializeWirelessFlow();
+                });
             }
         }
     } catch (e) {}
