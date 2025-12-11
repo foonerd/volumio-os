@@ -144,14 +144,43 @@ function initializeWirelessDaemon() {
     }
 }
 
-function kill(process, callback) {
-    var all = process.split(" ");
-    var process = all[0];
-    var command = 'kill `pgrep -f "^' + process + '"` || true';
-    loggerDebug("killing: " + command);
-    return thus.exec(command, callback);
+function kill(pattern, callback) {
+    loggerDebug("kill(): Pattern: " + pattern);
+    
+    // Use pkill directly to avoid blocking in fs.watch() callback contexts
+    var command = 'pkill -f "' + pattern + '"';
+    
+    // Timeout protection to prevent indefinite blocking
+    var callbackFired = false;
+    var timeoutHandle = setTimeout(function() {
+        if (!callbackFired) {
+            callbackFired = true;
+            loggerInfo("WARNING: kill() timed out after " + (KILL_TIMEOUT/1000) + "s for: " + pattern);
+            callback(new Error('Kill operation timeout'));
+        }
+    }, KILL_TIMEOUT);
+    
+    return thus.exec(command, function(err, stdout, stderr) {
+        if (!callbackFired) {
+            callbackFired = true;
+            clearTimeout(timeoutHandle);
+            
+            // pkill returns 1 if no processes found - NOT an error
+            // Since exec() doesn't give us direct access to exit code,
+            // we treat ANY pkill error as "not found" (safe assumption)
+            // pkill only fails if: no processes (1) or syntax error (2+)
+            // Our patterns are static, so syntax errors won't happen in production
+            if (err) {
+                // Assume "no processes found" which is normal
+                loggerDebug("kill(): No processes found: " + pattern);
+                return callback(null);
+            }
+            
+            loggerDebug("kill(): Success: " + pattern);
+            callback(null);
+        }
+    });
 }
-
 
 
 function launch(fullprocess, name, sync, callback) {
