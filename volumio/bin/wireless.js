@@ -104,6 +104,7 @@ var singleNetworkMode = true;  // Default ON for production
 var isWiredNetworkActive = false;
 var currentEthStatus = 'disconnected';
 var apStartInProgress = false;
+var wirelessFlowInProgress = false;
 
 // Global variables
 var retryCount = 0;
@@ -300,6 +301,13 @@ function stopAP(callback) {
 }
 
 function startFlow() {
+    // Prevent duplicate flow starts
+    if (wirelessFlowInProgress) {
+        loggerDebug("Wireless flow already in progress, ignoring duplicate call");
+        return;
+    }
+    wirelessFlowInProgress = true;
+
     // Stop any existing flow first
     clearConnectionTimer();
 
@@ -790,6 +798,7 @@ function afterAPStart() {
             // Clear timer immediately
             clearConnectionTimer();
             apStartInProgress = false; // Reset flag
+            wirelessFlowInProgress = false; // Reset flow flag
 
             const fallbackEnabled = hotspotFallbackCondition();
             const ssidMissing = !isConfiguredSSIDVisible();
@@ -849,6 +858,7 @@ function afterAPStart() {
                             // Clear timer
                             clearConnectionTimer();
                             apStartInProgress = false; // Reset flag
+                            wirelessFlowInProgress = false; // Reset flow flag
 
                             updateNetworkState("ap");
                             restartAvahi();
