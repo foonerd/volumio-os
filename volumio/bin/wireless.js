@@ -208,6 +208,14 @@ function waitForWlanRelease(attempt, onReleased) {
     }, RETRY_INTERVAL);
 }
 
+function clearConnectionTimer() {
+    if (lesstimer) {
+        clearInterval(lesstimer);
+        lesstimer = null;
+        loggerDebug("Cleared connection timer");
+    }
+}
+
 function stopAP(callback) {
     kill(justdhclient, function(err) {
         kill(wpasupp, function(err) {
@@ -218,11 +226,7 @@ function stopAP(callback) {
 
 function startFlow() {
     // Stop any existing flow first
-    if (lesstimer) {
-        clearInterval(lesstimer);
-        lesstimer = null;
-        loggerDebug("Cleared existing timer in startFlow");
-    }
+    clearConnectionTimer();
 
     actualTime = 0;
     apstopped = 0;
@@ -697,11 +701,7 @@ function afterAPStart() {
     actualTime = 0; // Reset timer
 
     // Make absolutely sure no old timer exists
-    if (lesstimer) {
-        clearInterval(lesstimer);
-        lesstimer = null;
-        loggerDebug("Cleared old timer in afterAPStart");
-    }
+    clearConnectionTimer();
 
     lesstimer = setInterval(()=> {
         actualTime += pollingTime;
@@ -713,8 +713,7 @@ function afterAPStart() {
             loggerInfo("Overtime, connection failed. Evaluating hotspot condition.");
 
             // Clear timer immediately
-            clearInterval(lesstimer);
-            lesstimer = null;
+            clearConnectionTimer();
             apStartInProgress = false; // Reset flag
 
             const fallbackEnabled = hotspotFallbackCondition();
@@ -773,8 +772,7 @@ function afterAPStart() {
                             retryCount = 0;
 
                             // Clear timer
-                            clearInterval(lesstimer);
-                            lesstimer = null;
+                            clearConnectionTimer();
                             apStartInProgress = false; // Reset flag
 
                             updateNetworkState("ap");
