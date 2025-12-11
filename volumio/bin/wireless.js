@@ -253,7 +253,30 @@ function kill(pattern, callback) {
     });
 }
 
+// Extract target process from command string - DEPRECATED
+// Process matching now uses interface-specific patterns for reliability
+// Keeping function for compatibility but it's not called
+function extractTargetProcess(commandString) {
+    var parts = commandString.split(" ");
+    var firstPart = parts[0];
+    
+    // Check if command is sudo-wrapped
+    if (firstPart === SUDO || firstPart === "/usr/bin/sudo") {
+        // Return actual target command (element after sudo)
+        if (parts.length > 1) {
+            loggerDebug("extractTargetProcess(): Skipping sudo wrapper, target is: " + parts[1]);
+            return parts[1];
+        }
+    }
+    
+    // Not sudo-wrapped, return first element
+    loggerDebug("extractTargetProcess(): Direct command, target is: " + firstPart);
+    return firstPart;
+}
 
+// Launch a command either synchronously or asynchronously with logging
+// sync=true: waits for process to complete before callback
+// sync=false: spawns process and calls callback immediately
 function launch(fullprocess, name, sync, callback) {
     if (sync) {
         var child = thus.exec(fullprocess, {}, callback);
@@ -334,16 +357,99 @@ function stopHotspot(callback) {
     });
 }
 
+// Start WiFi client (station) mode - connects to configured AP
+// VERSION 19 - STAGE 1 INTEGRATION:
+// - Synchronizes with udev rename operations
+// - Validates interface identity and readiness
+// - Eliminates blind polling and arbitrary waits
+// - Provides diagnostic information on failures
 function startAP(callback) {
     loggerInfo("Stopped hotspot (if there)..");
     launch(ifdeconfig, "ifdeconfig", true, function (err) {
         loggerDebug("Conf " + ifdeconfig);
-        waitForWlanRelease(0, function () {
-            launch(wpasupp, "wpa supplicant", false, function (err) {
-                loggerDebug("wpasupp " + err);
-                wpaerr = err ? 1 : 0;
+        
+        // STAGE 1: Wait for udev to complete any pending rename operations
+        // This prevents wpa_supplicant from binding to interface mid-rename
+        waitForUdevSettle(5000, function(udevErr) {
+            
+            // STAGE 1: Validate interface is ready before proceeding
+            // Checks: interface exists, driver loaded, not in unknown state
+            var validation = validateInterfaceReady(wlan);
+            
+            if (!validation.ready) {
+                loggerInfo("STAGE 1 VALIDATION FAILED: " + wlan + " not ready - reason: " + validation.reason);
+                
+                // Try waiting for interface to become ready
+                waitForInterfaceReady(wlan, INTERFACE_READY_TIMEOUT, function(waitErr, finalValidation) {
+                    if (waitErr || !finalValidation.ready) {
+                        loggerInfo("ERROR: " + wlan + " failed to become ready, cannot start WiFi client mode");
+                        wpaerr = 1;
+                        return callback(new Error('Interface validation failed: ' + validation.reason));
+                    }
+                    
+                    // Interface became ready, continue
+                    loggerInfo("STAGE 1: " + wlan + " became ready after waiting");
+                    proceedWithWpaSupplicant(finalValidation, callback);
+                });
+                return;
+            }
+            
+            // Interface is ready immediately
+            loggerInfo("STAGE 1: " + wlan + " validated and ready (MAC: " + validation.mac + ", USB: " + validation.isUSB + ")");
+            proceedWithWpaSupplicant(validation, callback);
+        });
+    });
+}
 
-                let staticDhcpFile;
+// Helper function to launch wpa_supplicant after validation passes
+function proceedWithWpaSupplicant(validation, callback) {
+    // Cache interface identity for later verification
+    var initialMAC = validation.mac;
+    var initialIsUSB = validation.isUSB;
+    
+    launch(wpasupp, "wpa supplicant", true, function (err) {
+        loggerDebug("wpasupp " + err);
+        wpaerr = err ? 1 : 0;
+        
+        // STAGE 1: Verify interface identity hasn't changed during wpa_supplicant launch
+        if (!verifyInterfaceIdentity(wlan, initialMAC)) {
+            loggerInfo("CRITICAL: " + wlan + " identity changed during wpa_supplicant launch!");
+            loggerInfo("This indicates udev rename race condition - wpa_supplicant may be bound to wrong device");
+            
+            // Check if interface was renamed
+            var newName = detectInterfaceRename(wlan, initialMAC);
+            if (newName) {
+                loggerInfo("Original " + wlan + " is now named " + newName);
+            }
+            
+            wpaerr = 1;
+            return callback(new Error('Interface identity changed during operation'));
+        }
+        
+        // Bring interface UP first (separate command with own timeout)
+        try {
+            execSync(SUDO + " " + IFCONFIG + " " + wlan + " up", { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+            loggerDebug("Brought " + wlan + " interface up");
+        } catch (e) {
+            loggerDebug("Could not bring interface up: " + e);
+        }
+        
+        // Give interface time to stabilize (1 second)
+        try {
+            execSync("sleep 1", { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+        } catch (e) {
+            loggerDebug("Sleep interrupted: " + e);
+        }
+        
+        // Tell wpa_supplicant to reconfigure (separate command with own timeout)
+        try {
+            execSync(wpacli + " reconfigure", { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+            loggerDebug("Triggered wpa_cli reconfigure");
+        } catch (e) {
+            loggerDebug("Could not trigger reconfigure: " + e);
+        }
+
+        let staticDhcpFile;
                 try {
                     staticDhcpFile = fs.readFileSync(WLAN_STATIC, 'utf8');
                     loggerInfo("FIXED IP via wlanstatic");
@@ -352,30 +458,114 @@ function startAP(callback) {
                     loggerInfo("DHCP IP fallback");
                 }
 
-                launch(staticDhcpFile, "dhclient", false, callback);
+                // STAGE 2: Event-driven wpa_supplicant state monitoring
+                // Replaces 30-second polling loop with real-time state detection
+                loggerInfo("STAGE 2: Starting event-driven WPA state monitor");
+                
+                startWpaStateMonitor(wlan, function(finalState, stateData) {
+                    if (finalState === 'COMPLETED') {
+                        // Connection successful
+                        loggerInfo("STAGE 2: Connection successful - " + stateData.message);
+                        
+                        // Check if this is a USB WiFi adapter
+                        if (isUsbWifiAdapter()) {
+                            // Query and log capabilities on first detection
+                            if (!usbWifiCapabilities) {
+                                usbWifiCapabilities = queryUsbWifiCapabilities();
+                                logUsbWifiCapabilities(usbWifiCapabilities);
+                                notifyUsbWifiLimitations(usbWifiCapabilities);
+                            }
+                            
+                            loggerInfo("Restarting dhcpcd.service for reliable DHCP");
+                            try {
+                                execSync(restartdhcpcd, { encoding: 'utf8', timeout: EXEC_TIMEOUT_LONG });
+                                loggerDebug("dhcpcd.service restarted successfully");
+                            } catch (e) {
+                                loggerInfo("WARNING: Failed to restart dhcpcd.service: " + e);
+                            }
+                            setTimeout(function() {
+                                callback();
+                            }, USB_SETTLE_WAIT);
+                        } else {
+                            loggerInfo("Onboard WiFi adapter detected, using standard dhcpcd flow");
+                            // Wait 1 second then launch dhcpcd
+                            setTimeout(function() {
+                                launch(staticDhcpFile, "dhclient", false, function() {
+                                    // Verify dhcpcd process status
+                                    setTimeout(function() {
+                                        try {
+                                            var dhcpcdCheck = execSync(PGREP + " -f 'dhcpcd.*" + wlan + "'", { encoding: 'utf8' });
+                                            loggerDebug("dhcpcd process running for " + wlan + ": " + dhcpcdCheck.trim());
+                                            
+                                            // Check if dhcpcd actually assigned an IP
+                                            setTimeout(function() {
+                                                try {
+                                                    var ipCheck = execSync(ipAddr + " | " + GREP + " 'inet ' | awk '{print $2}'", { encoding: 'utf8' }).trim();
+                                                    if (ipCheck && ipCheck.length > 0) {
+                                                        loggerDebug("dhcpcd assigned IP: " + ipCheck);
+                                                    } else {
+                                                        loggerInfo("WARNING: dhcpcd running but no IP assigned yet");
+                                                    }
+                                                } catch (e) {
+                                                    loggerDebug("IP check failed: " + e);
+                                                }
+                                            }, 3000);
+                                        } catch (e) {
+                                            loggerInfo("Warning: dhcpcd may not be managing " + wlan);
+                                        }
+                                        callback();
+                                    }, USB_SETTLE_WAIT);
+                                });
+                            }, 1000);
+                        }
+                    } else {
+                        // Connection failed - handle based on failure reason
+                        var explanation = getFailureExplanation(finalState);
+                        loggerInfo("STAGE 2: Connection failed - " + explanation);
+                        
+                        if (stateData && typeof stateData === 'string') {
+                            loggerInfo("STAGE 2: Failure details: " + stateData);
+                        }
+                        
+                        // For INTERFACE_DISABLED, verify interface identity hasn't changed
+                        if (finalState === 'INTERFACE_DISABLED') {
+                            if (!verifyInterfaceIdentity(wlan, initialMAC)) {
+                                loggerInfo("STAGE 2: Interface identity changed - rename race detected");
+                            }
+                        }
+                        
+                        // Set flag to skip afterAPStart polling loop
+                        // Stage 2 already determined connection failed, no need to poll again
+                        stage2Failed = true;
+                        loggerInfo("STAGE 2: Skipping afterAPStart loop, proceeding directly to hotspot evaluation");
+                        
+                        // Proceed to callback which will trigger afterAPStart
+                        // afterAPStart will check stage2Failed flag and skip its polling loop
+                        callback();
+                    }
+                });
             });
-        });
-    });
 }
 
-// Wait for wlan0 interface to be down or released
+// Wait for wlan0 interface to be down or released (no carrier)
+// Polls interface state up to MAX_RETRIES times before proceeding
 function waitForWlanRelease(attempt, onReleased) {
     const MAX_RETRIES = 10;
     const RETRY_INTERVAL = 1000;
 
     try {
-        const output = execSync('ip link show wlan0').toString();
+        const output = execSync(ipLink).toString();
         if (output.includes('state DOWN') || output.includes('NO-CARRIER')) {
-            loggerDebug("wlan0 is released.");
+            loggerDebug(wlan + " is released.");
             return onReleased();
         }
     } catch (e) {
-        loggerDebug("Error checking wlan0: " + e);
+        loggerDebug("Error checking " + wlan + ": " + e);
         return onReleased(); // fallback if interface not found
     }
 
     if (attempt >= MAX_RETRIES) {
-        loggerDebug("Timeout waiting for wlan0 release.");
+        loggerDebug("Timeout waiting for " + wlan + " release.");
         return onReleased();
     }
 
@@ -1346,8 +1536,48 @@ function initializeWirelessFlow() {
         })});
 }
 
+// Check network status for diagnostics
+function wstatus(param) {
+    if (param) {
+        loggerDebug("querying");
+    }
+}
+
+// Restart Avahi mDNS service for network discovery
+// Avahi needs restart after IP change to broadcast correctly
+function restartAvahi() {
+    try {
+        loggerInfo('Restarting avahi-daemon...');
+        execSync(SUDO + ' ' + SYSTEMCTL + ' restart avahi-daemon', { encoding: 'utf8' });
+        
+        // Verify it actually started
+        setTimeout(function() {
+            try {
+                var avahiStatus = execSync(SYSTEMCTL + ' is-active avahi-daemon', { encoding: 'utf8' }).trim();
+                if (avahiStatus === 'active') {
+                    loggerDebug('Avahi successfully restarted and active');
+                } else {
+                    loggerInfo('Avahi restart completed but service not active: ' + avahiStatus);
+                }
+            } catch (e) {
+                loggerInfo('Could not verify Avahi status: ' + e);
+            }
+        }, USB_SETTLE_WAIT);
+    } catch (e) {
+        loggerInfo('Could not restart Avahi: ' + e);
+    }
+}
+
+// Update network state file for system monitoring
+// States: "ap" (client connected), "hotspot" (AP mode), "offline"
+
+// Write network state for node notifier monitoring
 function wstatus(nstatus) {
-    thus.exec("echo " + nstatus + " >/tmp/networkstatus", null);
+    try {
+        thus.exec("echo " + nstatus + " >" + NETWORK_STATUS_FILE, null);
+    } catch (e) {
+        loggerDebug("Could not write network status: " + e);
+    }
 }
 
 function updateNetworkState(state) {
@@ -1355,42 +1585,44 @@ function updateNetworkState(state) {
     refreshNetworkStatusFile();
 }
 
-function restartAvahi() {
-    loggerInfo("Restarting avahi-daemon...");
-    thus.exec("/bin/systemctl restart avahi-daemon", function (err, stdout, stderr) {
-        if (err) {
-            loggerInfo("Avahi restart failed: " + err);
-        }
-    });
+// Logging helper - outputs to both console and /tmp/wireless.log
+function loggerDebug(message) {
+    if (!debug) return; // Only log debug messages if debug flag is enabled
+    var now = new Date();
+    // Debug messages go ONLY to file (with timestamp), not console
+    fs.appendFileSync(WIRELESS_LOG, "[" + now.toISOString() + "] DEBUG: " + message + "\n");
 }
 
-function loggerDebug(msg) {
-    if (debug) {
-        console.log('WIRELESS.JS Debug: ' + msg)
-    }
-    writeToLogFile('DEBUG', msg);
+// Logging helper for informational messages
+function loggerInfo(message) {
+    var now = new Date();
+    // Info to console: NO timestamp (journalctl adds it)
+    console.log("INFO: " + message);
+    // Info to file: WITH timestamp (for manual reading)
+    fs.appendFileSync(WIRELESS_LOG, "[" + now.toISOString() + "] INFO: " + message + "\n");
 }
 
-function loggerInfo(msg) {
-    console.log('WIRELESS.JS: ' + msg);
-    writeToLogFile('INFO', msg);
-}
-
-function writeToLogFile(level, msg) {
-    try {
-        const timestamp = new Date().toISOString();
-        fs.appendFileSync(WIRELESS_LOG, `[${timestamp}] ${level}: ${msg}\n`);
-    } catch (e) {}
-}
-
+// Update timestamp to trigger node notifier watch
 function refreshNetworkStatusFile() {
     try {
+        // Create file if it doesn't exist
+        if (!fs.existsSync(NETWORK_STATUS_FILE)) {
+            fs.writeFileSync(NETWORK_STATUS_FILE, '', { encoding: 'utf8' });
+            loggerDebug("Created network status file: " + NETWORK_STATUS_FILE);
+        }
         fs.utimesSync(NETWORK_STATUS_FILE, new Date(), new Date());
+        loggerDebug("Refreshed network status timestamp");
     } catch (e) {
-        loggerDebug("Failed to refresh /tmp/networkstatus timestamp: " + e.toString());
+        loggerDebug("Could not refresh network status timestamp: " + e);
     }
 }
 
+// ===================================================================
+// CONFIGURATION FUNCTIONS
+// ===================================================================
+
+// Read wireless configuration from JSON config file
+// Returns configuration object with wireless settings
 function getWirelessConfiguration() {
     try {
         var conf = fs.readJsonSync(NETWORK_CONFIG);
