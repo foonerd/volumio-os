@@ -27,6 +27,16 @@
 //===================================================================
 
 // ===================================================================
+// CONFIGURATION CONSTANTS
+// ===================================================================
+// Debug flag - set via DEBUG_WIRELESS=true in /volumio/.env
+var debug = false;
+var settleTime = 3000;
+var totalSecondsForConnection = 30;
+var pollingTime = 1;
+var hostapdExitDelay = 500; // Delay after hostapd exits before IP notification (ms)
+
+// ===================================================================
 // TIMEOUT CONSTANTS - Single source of truth for all timeout values
 // ===================================================================
 var EXEC_TIMEOUT_SHORT = 2000;      // General command execution (2s)
@@ -91,10 +101,6 @@ var SYS_CLASS_NET = "/sys/class/net";
 var VOLUMIO_PLUGINS = "/volumio/app/plugins";
 var IFCONFIG_LIB = VOLUMIO_PLUGINS + "/system_controller/network/lib/ifconfig.js";
 
-// Time needed to settle some commands sent to the system like ifconfig
-var debug = false;
-
-var settleTime = 3000;
 var fs = require('fs-extra')
 var thus = require('child_process');
 var wlan = "wlan0";
@@ -124,24 +130,64 @@ var iwList = IW + " list";
 var ipLink = IP + " link show " + wlan;
 var ipAddr = IP + " addr show " + wlan;
 var checkInterfaceLink = "readlink " + SYS_CLASS_NET + "/" + wlan;
+
+// ===================================================================
+// WPA STATE MACHINE CONSTANTS (STAGE 2)
+// ===================================================================
+// WPA supplicant state definitions
+var WPA_STATES = {
+    DISCONNECTED: 'DISCONNECTED',
+    INTERFACE_DISABLED: 'INTERFACE_DISABLED',
+    INACTIVE: 'INACTIVE',
+    SCANNING: 'SCANNING',
+    AUTHENTICATING: 'AUTHENTICATING',
+    ASSOCIATING: 'ASSOCIATING',
+    FOUR_WAY_HANDSHAKE: '4WAY_HANDSHAKE',
+    GROUP_HANDSHAKE: 'GROUP_HANDSHAKE',
+    COMPLETED: 'COMPLETED'
+};
+
+// State timeout configurations (milliseconds)
+var WPA_STATE_TIMEOUTS = {
+    SCANNING: 15000,              // 15s to find network
+    AUTHENTICATING: 10000,        // 10s to authenticate
+    ASSOCIATING: 10000,           // 10s to associate
+    FOUR_WAY_HANDSHAKE: 10000,    // 10s for 4-way handshake
+    INTERFACE_DISABLED: 5000      // 5s to recover from disabled state
+};
+
+// ===================================================================
+// STATE VARIABLES
+// ===================================================================
 var singleNetworkMode = true;  // Default ON for production
 var isWiredNetworkActive = false;
 var currentEthStatus = 'disconnected';
+var usbWifiCapabilities = null;  // Cached USB capabilities
 var apStartInProgress = false;
 var wirelessFlowInProgress = false;
-
-// Global variables
 var retryCount = 0;
 var maxRetries = 3;
 var wpaerr;
 var lesstimer;
-var totalSecondsForConnection = 30;
-var pollingTime = 1;
 var actualTime = 0;
-var apstopped = 0
+var apstopped = 0;
+var stage2Failed = false;  // Stage 2 connection failure flag
 var transitionStartTime = 0;  // Track transition timing for diagnostics
 
+// WPA State machine context (Stage 2)
+var wpaStateContext = {
+    currentState: null,
+    previousState: null,
+    stateEnterTime: null,
+    monitorProcess: null,
+    stateCallback: null,
+    timeoutHandle: null,
+    consecutiveFailures: 0
+};
 
+// ===================================================================
+// MAIN ENTRY POINT
+// ===================================================================
 if (process.argv.length < 2) {
     loggerInfo("Volumio Wireless Daemon. Use: start|stop");
 } else {
