@@ -778,6 +778,119 @@ function handleWpaStateTransition(oldState, newState, statusOutput) {
     }
 }
 
+// State-specific handlers
+
+function handleInterfaceDisabledState() {
+    loggerInfo("WpaStateMachine: INTERFACE_DISABLED detected - interface or driver issue");
+    wpaStateContext.consecutiveFailures++;
+    
+    // Set timeout for recovery
+    wpaStateContext.timeoutHandle = setTimeout(function() {
+        loggerInfo("WpaStateMachine: INTERFACE_DISABLED timeout - triggering failure callback");
+        stopWpaStateMonitor();
+        if (wpaStateContext.stateCallback) {
+            wpaStateContext.stateCallback('INTERFACE_DISABLED', 'Interface disabled - possible rename race or driver issue');
+        }
+    }, WPA_STATE_TIMEOUTS.INTERFACE_DISABLED);
+}
+
+function handleScanningState() {
+    loggerDebug("WpaStateMachine: SCANNING - looking for networks");
+    
+    // Set timeout for scanning
+    wpaStateContext.timeoutHandle = setTimeout(function() {
+        loggerInfo("WpaStateMachine: SCANNING timeout - network not found");
+        wpaStateContext.consecutiveFailures++;
+        stopWpaStateMonitor();
+        if (wpaStateContext.stateCallback) {
+            wpaStateContext.stateCallback('SCAN_FAILED', 'Network not found after scanning');
+        }
+    }, WPA_STATE_TIMEOUTS.SCANNING);
+}
+
+function handleAuthenticatingState() {
+    loggerDebug("WpaStateMachine: AUTHENTICATING - attempting authentication");
+    
+    // Set timeout for authentication
+    wpaStateContext.timeoutHandle = setTimeout(function() {
+        loggerInfo("WpaStateMachine: AUTHENTICATING timeout - authentication failed");
+        wpaStateContext.consecutiveFailures++;
+        stopWpaStateMonitor();
+        if (wpaStateContext.stateCallback) {
+            wpaStateContext.stateCallback('AUTH_FAILED', 'Authentication timeout - check password');
+        }
+    }, WPA_STATE_TIMEOUTS.AUTHENTICATING);
+}
+
+function handleAssociatingState() {
+    loggerDebug("WpaStateMachine: ASSOCIATING - attempting association");
+    
+    // Set timeout for association
+    wpaStateContext.timeoutHandle = setTimeout(function() {
+        loggerInfo("WpaStateMachine: ASSOCIATING timeout - association failed");
+        wpaStateContext.consecutiveFailures++;
+        stopWpaStateMonitor();
+        if (wpaStateContext.stateCallback) {
+            wpaStateContext.stateCallback('ASSOC_FAILED', 'Association timeout');
+        }
+    }, WPA_STATE_TIMEOUTS.ASSOCIATING);
+}
+
+function handleFourWayHandshakeState() {
+    loggerDebug("WpaStateMachine: 4WAY_HANDSHAKE - performing key exchange");
+    
+    // Set timeout for 4-way handshake
+    wpaStateContext.timeoutHandle = setTimeout(function() {
+        loggerInfo("WpaStateMachine: 4WAY_HANDSHAKE timeout - wrong password or PSK issue");
+        wpaStateContext.consecutiveFailures++;
+        stopWpaStateMonitor();
+        if (wpaStateContext.stateCallback) {
+            wpaStateContext.stateCallback('HANDSHAKE_FAILED', 'Wrong password or PSK mismatch');
+        }
+    }, WPA_STATE_TIMEOUTS.FOUR_WAY_HANDSHAKE);
+}
+
+function handleCompletedState(statusOutput) {
+    loggerInfo("WpaStateMachine: COMPLETED - connection successful");
+    wpaStateContext.consecutiveFailures = 0;
+    
+    // Extract SSID from status
+    var ssidMatch = statusOutput.match(/ssid=([^\n]+)/);
+    var ssid = ssidMatch ? ssidMatch[1] : 'unknown';
+    
+    // Stop monitoring and report success
+    stopWpaStateMonitor();
+    if (wpaStateContext.stateCallback) {
+        wpaStateContext.stateCallback('COMPLETED', {
+            ssid: ssid,
+            message: 'Connected to ' + ssid
+        });
+    }
+}
+
+function handleDisconnectedState() {
+    loggerDebug("WpaStateMachine: DISCONNECTED - not associated");
+    wpaStateContext.consecutiveFailures++;
+    
+    // This is normal during connection attempt, don't timeout immediately
+    // Just log it and let other states handle timeouts
+}
+
+// Get human-readable explanation for failure reason
+function getFailureExplanation(reason) {
+    var explanations = {
+        'INTERFACE_DISABLED': 'WiFi interface disabled - possible hardware or driver issue',
+        'SCAN_FAILED': 'Network not found - check SSID and signal strength',
+        'AUTH_FAILED': 'Authentication failed - check network configuration',
+        'ASSOC_FAILED': 'Association failed - AP may be rejecting connection',
+        'HANDSHAKE_FAILED': 'Wrong password or security configuration mismatch',
+        'TIMEOUT': 'Connection attempt timed out',
+        'ERROR': 'wpa_supplicant error or crash'
+    };
+    
+    return explanations[reason] || 'Unknown failure: ' + reason;
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
