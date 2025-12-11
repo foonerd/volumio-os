@@ -41,7 +41,7 @@ var TR = "tr";
 // System paths
 var VOLUMIO_ENV = "/volumio/.env";
 var OS_RELEASE = "/etc/os-release";
-var CRDA_CONFIG = "/etc/default/crda";
+var CRDA_CONFIG = CRDA_CONFIG;
 var WPA_SUPPLICANT_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf";
 
 // Data paths
@@ -232,7 +232,7 @@ function startAP(callback) {
 
                 let staticDhcpFile;
                 try {
-                    staticDhcpFile = fs.readFileSync('/data/configuration/wlanstatic', 'utf8');
+                    staticDhcpFile = fs.readFileSync(WLAN_STATIC, 'utf8');
                     loggerInfo("FIXED IP via wlanstatic");
                 } catch (e) {
                     staticDhcpFile = dhclient; // fallback
@@ -297,15 +297,15 @@ function startFlow() {
     wpaerr = 0;
 
     try {
-        var netconfigured = fs.statSync('/data/configuration/netconfigured');
+        var netconfigured = fs.statSync(NET_CONFIGURED);
     } catch (e) {
         var directhotspot = true;
     }
 
     try {
-        fs.accessSync('/tmp/forcehotspot', fs.F_OK);
+        fs.accessSync(FORCE_HOTSPOT_FLAG, fs.F_OK);
         var hotspotForce = true;
-        fs.unlinkSync('/tmp/forcehotspot')
+        fs.unlinkSync(FORCE_HOTSPOT_FLAG)
     } catch (e) {
         var hotspotForce = false;
     }
@@ -447,13 +447,13 @@ function loggerInfo(msg) {
 function writeToLogFile(level, msg) {
     try {
         const timestamp = new Date().toISOString();
-        fs.appendFileSync('/tmp/wireless.log', `[${timestamp}] ${level}: ${msg}\n`);
+        fs.appendFileSync(WIRELESS_LOG, `[${timestamp}] ${level}: ${msg}\n`);
     } catch (e) {}
 }
 
 function refreshNetworkStatusFile() {
     try {
-        fs.utimesSync('/tmp/networkstatus', new Date(), new Date());
+        fs.utimesSync(NETWORK_STATUS_FILE, new Date(), new Date());
     } catch (e) {
         loggerDebug("Failed to refresh /tmp/networkstatus timestamp: " + e.toString());
     }
@@ -461,12 +461,12 @@ function refreshNetworkStatusFile() {
 
 function getWirelessConfiguration() {
     try {
-        var conf = fs.readJsonSync('/data/configuration/system_controller/network/config.json');
+        var conf = fs.readJsonSync(NETWORK_CONFIG);
         loggerDebug('Loaded configuration');
         loggerDebug('CONF: ' + JSON.stringify(conf));
     } catch (e) {
         loggerDebug('First boot');
-        var conf = fs.readJsonSync('/volumio/app/plugins/system_controller/network/config.json');
+        var conf = fs.readJsonSync(VOLUMIO_PLUGINS + '/system_controller/network/config.json');
     }
     return conf
 }
@@ -560,7 +560,7 @@ function applyNewRegDomain(newRegDom) {
     try {
         execSync("/usr/bin/sudo /sbin/ifconfig wlan0 up && /usr/bin/sudo /sbin/iw reg set " + newRegDom, { uid: 1000, gid: 1000, encoding: 'utf8'});
         //execSync("/usr/bin/sudo /bin/echo 'REGDOMAIN=" + newRegDom + "' > /etc/default/crda", { uid: 1000, gid: 1000, encoding: 'utf8'});
-        fs.writeFileSync("/etc/default/crda", "REGDOMAIN=" + newRegDom);
+        fs.writeFileSync(CRDA_CONFIG, "REGDOMAIN=" + newRegDom);
         loggerInfo('SUCCESSFULLY SET NEW REGDOMAIN: ' + newRegDom)
     } catch(e) {
         loggerInfo('Failed to set new reg domain: ' + e);
@@ -661,7 +661,7 @@ function checkWiredNetworkStatus(isFirstStart) {
 function retrieveEnvParameters() {
     // Facility function to read env parameters, without the need for external modules
     try {
-        var envParameters = fs.readFileSync('/volumio/.env', { encoding: 'utf8'});
+        var envParameters = fs.readFileSync(VOLUMIO_ENV, { encoding: 'utf8'});
         if (envParameters.includes('SINGLE_NETWORK_MODE=true')) {
             singleNetworkMode = true;
             loggerInfo('Single Network Mode enabled, only one network device can be active at a time between ethernet and wireless');
@@ -849,4 +849,3 @@ function afterAPStart() {
         }
     }, pollingTime * 1000);
 }
-
