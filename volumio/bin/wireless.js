@@ -115,6 +115,7 @@ var totalSecondsForConnection = 30;
 var pollingTime = 1;
 var actualTime = 0;
 var apstopped = 0
+var transitionStartTime = 0;  // Track transition timing for diagnostics
 
 
 if (process.argv.length < 2) {
