@@ -329,28 +329,96 @@ function startHotspot(callback) {
         } else {
             launch(ifconfigHotspot, "confighotspot", true, function(err) {
                 loggerDebug("ifconfig " + err);
-                launch(starthostapd,"hotspot" , false, function() {
-                    updateNetworkState("hotspot");
-                    if (callback) callback();
+                
+                // Launch hostapd with custom completion handling
+                var all = starthostapd.split(" ");
+                var process = all[0];
+                if (all.length > 0) {
+                    all.splice(0, 1);
+                }
+                loggerDebug("launching " + process + " args: ");
+                loggerDebug(all);
+                
+                var hostapdChild = thus.spawn(process, all, {});
+                
+                hostapdChild.stdout.on('data', function(data) {
+                    loggerDebug("hotspot stdout: " + data);
                 });
+                
+                hostapdChild.stderr.on('data', function(data) {
+                    loggerDebug("hotspot stderr: " + data);
+                });
+                
+                hostapdChild.on('close', function(code) {
+                    loggerDebug("hotspotchild process exited with code " + code);
+                    
+                    // Trigger ip-changed AFTER hostapd actually completes
+                    setTimeout(function() {
+                        try {
+                            execSync(SYSTEMCTL + ' restart ip-changed@' + wlan + '.target', { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+                            loggerDebug("Triggered ip-changed@" + wlan + ".target for hotspot IP");
+                        } catch (e) {
+                            loggerDebug("Could not trigger ip-changed target: " + e);
+                        }
+                    }, hostapdExitDelay);
+                });
+                
+                // Continue with immediate callback for flow control
+                updateNetworkState("hotspot");
+                if (callback) callback();
             });
         }
     });
 }
 
+// Force start hotspot even if disabled (used for factory reset scenarios)
+// Force start hotspot even if disabled (used for factory reset scenarios)
 function startHotspotForce(callback) {
     stopHotspot(function(err) {
-        loggerInfo('Starting Force Hotspot')
         launch(ifconfigHotspot, "confighotspot", true, function(err) {
             loggerDebug("ifconfig " + err);
-            launch(starthostapd,"hotspot" , false, function() {
-                updateNetworkState("hotspot");
-                if (callback) callback();
+            
+            // Launch hostapd with custom completion handling
+            var all = starthostapd.split(" ");
+            var process = all[0];
+            if (all.length > 0) {
+                all.splice(0, 1);
+            }
+            loggerDebug("launching " + process + " args: ");
+            loggerDebug(all);
+            
+            var hostapdChild = thus.spawn(process, all, {});
+            
+            hostapdChild.stdout.on('data', function(data) {
+                loggerDebug("hotspot stdout: " + data);
             });
+            
+            hostapdChild.stderr.on('data', function(data) {
+                loggerDebug("hotspot stderr: " + data);
+            });
+            
+            hostapdChild.on('close', function(code) {
+                loggerDebug("hotspotchild process exited with code " + code);
+                
+                // Trigger ip-changed AFTER forced hostapd actually completes
+                setTimeout(function() {
+                    try {
+                        execSync(SYSTEMCTL + ' restart ip-changed@' + wlan + '.target', { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT });
+                        loggerDebug("Triggered ip-changed@" + wlan + ".target for forced hotspot IP");
+                    } catch (e) {
+                        loggerDebug("Could not trigger ip-changed target: " + e);
+                    }
+                }, hostapdExitDelay);
+            });
+            
+            // Continue with immediate callback for flow control
+            updateNetworkState("hotspot");
+            if (callback) callback();
         });
     });
 }
 
+// Stop WiFi hotspot and deconfigure interface
 function stopHotspot(callback) {
     launch(stophostapd, "stophotspot" , true, function(err) {
         launch(ifdeconfig, "ifdeconfig", true, callback);
@@ -1163,9 +1231,30 @@ function notifyUsbWifiLimitations(caps) {
     }
 }
 
+// Stop WiFi client mode by killing dhcpcd and wpa_supplicant
 function stopAP(callback) {
+    // Use interface-specific patterns to avoid killing eth0 dhcpcd
+    loggerDebug("stopAP: BEGIN");
+    var startTime = Date.now();
+    
     kill(justdhclient, function(err) {
-        kill(wpasupp, function(err) {
+        var dhcpTime = Date.now() - startTime;
+        if (err) {
+            loggerInfo("stopAP: dhclient kill error (" + dhcpTime + "ms): " + err);
+        } else {
+            loggerDebug("stopAP: dhclient killed successfully (" + dhcpTime + "ms)");
+        }
+        
+        kill(wpasuppPattern, function(err) {
+            var wpaTime = Date.now() - startTime - dhcpTime;
+            if (err) {
+                loggerInfo("stopAP: wpa_supplicant kill error (" + wpaTime + "ms): " + err);
+            } else {
+                loggerDebug("stopAP: wpa_supplicant killed successfully (" + wpaTime + "ms)");
+            }
+            
+            var totalTime = Date.now() - startTime;
+            loggerDebug("stopAP: END - total time " + totalTime + "ms");
             callback();
         });
     });
@@ -1525,15 +1614,12 @@ if ( ! fs.existsSync("/sys/class/net/" + wlan + "/operstate") ) {
 
 function initializeWirelessFlow() {
     loggerInfo("Wireless.js initializing wireless flow");
-    loggerInfo("Cleaning previous...");
-    stopHotspot(function () {
-        stopAP(function() {
-            loggerInfo("Stopped aP");
-            // Here we set the regdomain if not set
-            detectAndApplyRegdomain(function() {
-                startFlow();
-            });
-        })});
+    stop(function() {
+        loggerInfo("Cleaning previous...");
+        detectAndApplyRegdomain(function() {
+            startFlow();
+        });
+    });
 }
 
 // Check network status for diagnostics
@@ -2022,6 +2108,77 @@ function waitForInterfaceReleaseAndStartAP() {
 
 function afterAPStart() {
     loggerInfo("Start ap");
+    
+    // Signal systemd ready EARLY to prevent timeout killing the service
+    // We're starting the connection polling loop, service is operational
+    notifyWirelessReady();
+    
+    // Check if Stage 2 already determined connection failed
+    if (stage2Failed) {
+        loggerInfo("STAGE 2: Connection already failed, skipping polling loop");
+        stage2Failed = false; // Reset flag
+        
+        // Clear any existing timers
+        clearConnectionTimer();
+        apStartInProgress = false;
+        wirelessFlowInProgress = false;
+        
+        // Evaluate hotspot conditions directly
+        loggerInfo("STAGE 2: Evaluating hotspot condition directly");
+        
+        const fallbackEnabled = hotspotFallbackCondition();
+        const ssidMissing = !isConfiguredSSIDVisible();
+        const firstBoot = !hasWirelessConnectionBeenEstablishedOnce();
+
+        if (!isWirelessDisabled() && (fallbackEnabled || ssidMissing || firstBoot)) {
+            if (checkConcurrentModeSupport()) {
+                loggerInfo('Concurrent AP+STA supported. Starting hotspot without stopping STA.');
+                startHotspot(function (err) {
+                    if (err) {
+                        loggerInfo('Could not start Hotspot Fallback: ' + err);
+                    } else {
+                        updateNetworkState("hotspot");
+                    }
+                    notifyWirelessReady();
+                });
+            } else {
+                loggerInfo('No concurrent mode. Stopping STA and starting hotspot.');
+                apstopped = 1;
+                stopAP(function () {
+                    setTimeout(()=> {
+                        startHotspot(function (err) {
+                            if (err) {
+                                loggerInfo('Could not start Hotspot Fallback: ' + err);
+                            } else {
+                                updateNetworkState("hotspot");
+                            }
+                            notifyWirelessReady();
+                        });
+                    }, settleTime);
+                });
+            }
+        } else {
+            // Hotspot fallback conditions not met
+            // CRITICAL: Check if system is completely inaccessible
+            if (!isWiredNetworkActive) {
+                // EMERGENCY RECOVERY MODE
+                loggerInfo("=== EMERGENCY RECOVERY MODE ===");
+                loggerInfo("No network connectivity: Ethernet DOWN, WiFi connection FAILED");
+                loggerInfo("Forcing hotspot for system recovery (overriding config settings)");
+                loggerInfo("===============================");
+                startHotspotFallbackSafe();
+            } else {
+                // Ethernet is UP - system is accessible via LAN
+                loggerInfo("WiFi connection failed, but system accessible via ethernet");
+                apstopped = 0;
+                updateNetworkState("offline");
+                notifyWirelessReady();
+            }
+        }
+        
+        return; // Exit early, skip polling loop below
+    }
+    
     actualTime = 0; // Reset timer
 
     // Make absolutely sure no old timer exists
@@ -2034,7 +2191,21 @@ function afterAPStart() {
         }
 
         if (actualTime > totalSecondsForConnection) {
-            loggerInfo("Overtime, connection failed. Evaluating hotspot condition.");
+            // Determine reason for connection failure
+            var failureReason = "unknown";
+            try {
+                var ssidCheck = execSync(iwgetid, { uid: 1000, gid: 1000, encoding: 'utf8' }).replace('\n','');
+                if (ssidCheck && ssidCheck.length > 0) {
+                    failureReason = "SSID associated but no IP address received from DHCP";
+                } else {
+                    failureReason = "wpa_supplicant failed to associate with AP";
+                }
+            } catch (e) {
+                failureReason = "wpa_supplicant failed to associate with AP";
+            }
+            
+            loggerInfo("Overtime, connection failed. Reason: " + failureReason);
+            loggerInfo("Evaluating hotspot condition.");
 
             // Clear timer immediately
             clearConnectionTimer();
@@ -2073,42 +2244,122 @@ function afterAPStart() {
                     });
                 }
             } else {
-                apstopped = 0;
-                updateNetworkState("ap");
-                notifyWirelessReady();
+                // Hotspot fallback conditions not met
+                // CRITICAL: Check if system is completely inaccessible
+                if (!isWiredNetworkActive) {
+                    // EMERGENCY RECOVERY MODE
+                    // System has NO network connectivity (LAN down, WiFi failed)
+                    // Force hotspot regardless of config to allow user access
+                    loggerInfo("=== EMERGENCY RECOVERY MODE ===");
+                    loggerInfo("No network connectivity: Ethernet DOWN, WiFi connection FAILED");
+                    loggerInfo("Forcing hotspot for system recovery (overriding config settings)");
+                    loggerInfo("===============================");
+                    
+                    startHotspotFallbackSafe();
+                } else {
+                    // Ethernet is UP - system is accessible via LAN
+                    // WiFi failed but user can still access via ethernet
+                    loggerInfo("WiFi connection failed, but system accessible via ethernet");
+                    apstopped = 0;
+                    updateNetworkState("offline");
+                    notifyWirelessReady();
+                }
             }
 
             return; // Exit callback
         } else {
             var SSID = undefined;
             loggerInfo("trying...");
+            
+            // Verify wpa_supplicant still running
             try {
-                SSID = execSync("/usr/bin/sudo /sbin/iwgetid -r", { uid: 1000, gid: 1000, encoding: 'utf8' }).replace('\n','');
-                loggerInfo('Connected to: ----' + SSID + '----');
-            } catch (e) {}
-
-            if (SSID !== undefined) {
-                ifconfig.status(wlan, function (err, ifstatus) {
-                    loggerInfo("... joined AP, wlan0 IPv4 is " + ifstatus.ipv4_address + ", ipV6 is " + ifstatus.ipv6_address);
-                    if (((ifstatus.ipv4_address != undefined && ifstatus.ipv4_address.length > "0.0.0.0".length) ||
-                        (ifstatus.ipv6_address != undefined && ifstatus.ipv6_address.length > "::".length))) {
-                        if (apstopped == 0) {
-                            loggerInfo("It's done! AP");
-                            retryCount = 0;
-
-                            // Clear timer
-                            clearConnectionTimer();
-                            apStartInProgress = false; // Reset flag
-                            wirelessFlowInProgress = false; // Reset flow flag
-
-                            updateNetworkState("ap");
-                            restartAvahi();
-                            saveWirelessConnectionEstablished();
-                            notifyWirelessReady();
-                        }
+                var wpaCheck = execSync(PGREP + " -f 'wpa_supplicant.*" + wlan + "'", { encoding: 'utf8' });
+                loggerDebug("wpa_supplicant process active: " + wpaCheck.trim());
+                
+                // Check if wpa_supplicant has actually connected
+                try {
+                    var wpaState = execSync(wpacli + " status | " + GREP + " wpa_state", { encoding: 'utf8', timeout: EXEC_TIMEOUT_SHORT }).trim();
+                    loggerDebug("wpa_supplicant state: " + wpaState);
+                    
+                    if (wpaState.includes("COMPLETED")) {
+                        loggerDebug("wpa_supplicant reports COMPLETED state");
+                    } else {
+                        loggerDebug("wpa_supplicant not yet in COMPLETED state");
                     }
-                });
+                } catch (e) {
+                    loggerDebug("Could not query wpa_supplicant state: " + e);
+                }
+            } catch (e) {
+                loggerInfo("ERROR: wpa_supplicant process not found, connection impossible");
+                actualTime = totalSecondsForConnection + 1; // Force timeout
+                return;
             }
+            
+            // Try to get SSID but don't depend on it (RTL8822BU has iwgetid issues)
+            try {
+                SSID = execSync(iwgetid, { uid: 1000, gid: 1000, encoding: 'utf8' }).replace('\n','');
+                loggerDebug('iwgetid returned: ----' + SSID + '----');
+            } catch (e) {
+                loggerDebug('iwgetid returned nothing (may be driver issue, checking IP instead)');
+            }
+
+            // ALWAYS check IP regardless of iwgetid result
+            ifconfig.status(wlan, function (err, ifstatus) {
+                if (err) {
+                    loggerDebug("ifconfig.status error: " + err);
+                    return;
+                }
+                
+                if (!ifstatus) {
+                    loggerDebug("ifconfig.status returned null/undefined");
+                    return;
+                }
+                
+                loggerDebug("ifconfig.status returned: " + JSON.stringify(ifstatus));
+                
+                var hasIPv4 = (ifstatus.ipv4_address != undefined && 
+                               ifstatus.ipv4_address.length > 0 && 
+                               ifstatus.ipv4_address !== "0.0.0.0");
+                var hasIPv6 = (ifstatus.ipv6_address != undefined && 
+                               ifstatus.ipv6_address.length > 0 && 
+                               ifstatus.ipv6_address !== "::");
+                
+                loggerInfo("... " + wlan + " IPv4 is " + ifstatus.ipv4_address + ", ipV6 is " + ifstatus.ipv6_address);
+                
+                if (hasIPv4 || hasIPv6) {
+                    if (apstopped == 0) {
+                        // Get configured SSID for validation
+                        var configuredSSID = undefined;
+                        try {
+                            var conf = getWirelessConfiguration();
+                            configuredSSID = conf.wlanssid?.value;
+                        } catch (e) {}
+                        
+                        // Log connection with SSID if available
+                        if (SSID) {
+                            loggerInfo('Connected to SSID: ' + SSID);
+                            if (configuredSSID && SSID !== configuredSSID) {
+                                loggerInfo("WARNING: Connected to wrong SSID. Expected: " + configuredSSID);
+                            }
+                        } else {
+                            loggerInfo('Connected (iwgetid failed but IP assigned - driver compatibility issue)');
+                        }
+                        
+                        loggerInfo("It's done! AP");
+                        retryCount = 0;
+
+                        // Clear timer
+                        clearConnectionTimer();
+                        apStartInProgress = false; // Reset flag
+                        wirelessFlowInProgress = false; // Reset flow flag
+
+                        updateNetworkState("ap");
+                        restartAvahi();
+                        saveWirelessConnectionEstablished();
+                        notifyWirelessReady();
+                    }
+                }
+            });
         }
     }, pollingTime * 1000);
 }
