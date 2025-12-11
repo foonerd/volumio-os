@@ -523,6 +523,82 @@ function waitForInterfaceReady(interfaceName, maxWaitMs, callback) {
     checkReady();
 }
 
+// ===================================================================
+// MODULE 3: INTERFACE MONITOR
+// Tracks interface state changes and provides identity verification
+// ===================================================================
+
+// Interface descriptor cache
+var interfaceCache = {};
+
+// Update interface cache with current state
+function updateInterfaceCache(interfaceName) {
+    var mac = getInterfaceMAC(interfaceName);
+    if (!mac) {
+        delete interfaceCache[interfaceName];
+        return null;
+    }
+    
+    var descriptor = {
+        name: interfaceName,
+        mac: mac,
+        isUSB: isInterfaceUSB(interfaceName),
+        busPath: getInterfaceBusPath(interfaceName),
+        lastSeen: Date.now()
+    };
+    
+    interfaceCache[interfaceName] = descriptor;
+    return descriptor;
+}
+
+// Get interface descriptor (cached or fresh)
+function getInterfaceDescriptor(interfaceName) {
+    // Check cache first
+    if (interfaceCache[interfaceName]) {
+        var cached = interfaceCache[interfaceName];
+        var age = Date.now() - cached.lastSeen;
+        
+        // Cache valid for 5 seconds
+        if (age < 5000) {
+            return cached;
+        }
+    }
+    
+    // Update cache
+    return updateInterfaceCache(interfaceName);
+}
+
+// Verify interface identity hasn't changed (detect rename)
+// Returns true if interface still has same MAC address
+function verifyInterfaceIdentity(interfaceName, expectedMAC) {
+    var currentMAC = getInterfaceMAC(interfaceName);
+    
+    if (!currentMAC) {
+        loggerInfo("InterfaceMonitor: " + interfaceName + " no longer exists");
+        return false;
+    }
+    
+    if (currentMAC !== expectedMAC) {
+        loggerInfo("InterfaceMonitor: " + interfaceName + " identity changed! Was " + expectedMAC + ", now " + currentMAC);
+        return false;
+    }
+    
+    return true;
+}
+
+// Detect if interface was renamed by comparing against cache
+function detectInterfaceRename(originalName, currentMAC) {
+    // Check if any cached interface has the current MAC
+    for (var name in interfaceCache) {
+        var descriptor = interfaceCache[name];
+        if (descriptor.mac === currentMAC && name !== originalName) {
+            loggerInfo("InterfaceMonitor: Detected rename: " + originalName + " -> " + name + " (MAC: " + currentMAC + ")");
+            return name;
+        }
+    }
+    return null;
+}
+
 // Check if wlan0 is a USB WiFi adapter
 // Returns true if USB, false if onboard or check fails
 function isUsbWifiAdapter() {
