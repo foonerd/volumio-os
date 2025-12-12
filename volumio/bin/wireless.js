@@ -30,6 +30,7 @@
 // - Fixed regdomain log output showing on two lines (cosmetic)
 //
 // Production release: v4.0-rc4
+var WIRELESS_VERSION = "4.0-rc4";
 //===================================================================
 
 // ===================================================================
@@ -144,6 +145,8 @@ var fs = require('fs-extra')
 var thus = require('child_process');
 var execSync = require('child_process').execSync;
 var exec = require('child_process').exec;
+var crypto = require('crypto');
+var WIRELESS_BUILD = crypto.createHash('md5').update(fs.readFileSync(__filename, 'utf8')).digest('hex').slice(0,8);
 var ifconfig = require(IFCONFIG_LIB);
 
 // ===================================================================
@@ -244,6 +247,7 @@ function initializeWirelessDaemon() {
 // Main initialization entry point
 // Detects regulatory domain and starts wireless flow
 function initializeWirelessFlow() {
+    loggerInfo("Volumio Wireless Daemon v" + WIRELESS_VERSION + " - Build " + WIRELESS_BUILD);
     loggerInfo("Wireless.js initializing wireless flow");
     stop(function() {
         loggerInfo("Cleaning previous...");
